@@ -1,0 +1,23 @@
+# Build outputs
+target/
+out/
+*.class
+*.jar
+
+# StrataDB database & WAL files
+*.db
+*.wal
+*.db.wal
+
+# IDE / Editor files
+.idea/
+.vscode/
+*.iml
+*.iws
+.project
+.classpath
+.settings/
+
+# OS files
+Thumbs.db
+.DS_Store
