@@ -1,0 +1,75 @@
+Benchmark                                                      (rows)  Mode  Cnt        Score      Error   Units
+AccessPathBenchmark.hashIndexLookup                              1000  avgt    5        3.828 ±    0.393   us/op
+AccessPathBenchmark.hashIndexLookup:gc.alloc.rate                1000  avgt    5     4003.223 ±  415.674  MB/sec
+AccessPathBenchmark.hashIndexLookup:gc.alloc.rate.norm           1000  avgt    5    16062.585 ±    0.516    B/op
+AccessPathBenchmark.hashIndexLookup:gc.count                     1000  avgt    5       61.000             counts
+AccessPathBenchmark.hashIndexLookup:gc.time                      1000  avgt    5       80.000                 ms
+AccessPathBenchmark.hashIndexLookup                             10000  avgt    5       33.810 ±    3.880   us/op
+AccessPathBenchmark.hashIndexLookup:gc.alloc.rate               10000  avgt    5     3859.320 ±  450.158  MB/sec
+AccessPathBenchmark.hashIndexLookup:gc.alloc.rate.norm          10000  avgt    5   136768.021 ±    0.072    B/op
+AccessPathBenchmark.hashIndexLookup:gc.count                    10000  avgt    5       50.000             counts
+AccessPathBenchmark.hashIndexLookup:gc.time                     10000  avgt    5       61.000                 ms
+AccessPathBenchmark.hashIndexLookup                            100000  avgt    5      379.466 ±   82.468   us/op
+AccessPathBenchmark.hashIndexLookup:gc.alloc.rate              100000  avgt    5     3411.577 ±  731.220  MB/sec
+AccessPathBenchmark.hashIndexLookup:gc.alloc.rate.norm         100000  avgt    5  1354403.584 ±    0.676    B/op
+AccessPathBenchmark.hashIndexLookup:gc.count                   100000  avgt    5       33.000             counts
+AccessPathBenchmark.hashIndexLookup:gc.time                    100000  avgt    5       46.000                 ms
+AccessPathBenchmark.heapScan                                     1000  avgt    5       29.087 ±    8.973   us/op
+AccessPathBenchmark.heapScan:gc.alloc.rate                       1000  avgt    5     7030.634 ± 2002.494  MB/sec
+AccessPathBenchmark.heapScan:gc.alloc.rate.norm                  1000  avgt    5   213472.200 ±    0.058    B/op
+AccessPathBenchmark.heapScan:gc.count                            1000  avgt    5       79.000             counts
+AccessPathBenchmark.heapScan:gc.time                             1000  avgt    5       95.000                 ms
+AccessPathBenchmark.heapScan                                    10000  avgt    5      281.976 ±   59.354   us/op
+AccessPathBenchmark.heapScan:gc.alloc.rate                      10000  avgt    5     7261.047 ± 1472.668  MB/sec
+AccessPathBenchmark.heapScan:gc.alloc.rate.norm                 10000  avgt    5  2142665.942 ±    0.420    B/op
+AccessPathBenchmark.heapScan:gc.count                           10000  avgt    5       81.000             counts
+AccessPathBenchmark.heapScan:gc.time                            10000  avgt    5      113.000                 ms
+AccessPathBenchmark.heapScan                                   100000  avgt    5      563.291 ±   68.774   us/op
+AccessPathBenchmark.heapScan:gc.alloc.rate                     100000  avgt    5     7118.960 ±  867.242  MB/sec
+AccessPathBenchmark.heapScan:gc.alloc.rate.norm                100000  avgt    5  4202731.898 ±    0.465    B/op
+AccessPathBenchmark.heapScan:gc.count                          100000  avgt    5       70.000             counts
+AccessPathBenchmark.heapScan:gc.time                           100000  avgt    5      109.000                 ms
+CodecBenchmark.deserializeRow                                     N/A  avgt    5      205.110 ±   54.355   ns/op
+CodecBenchmark.deserializeRow:gc.alloc.rate                       N/A  avgt    5     2575.832 ±  701.197  MB/sec
+CodecBenchmark.deserializeRow:gc.alloc.rate.norm                  N/A  avgt    5      552.001 ±    0.001    B/op
+CodecBenchmark.deserializeRow:gc.count                            N/A  avgt    5       28.000             counts
+CodecBenchmark.deserializeRow:gc.time                             N/A  avgt    5       35.000                 ms
+CodecBenchmark.parseInsert                                        N/A  avgt    5      855.946 ±  208.224   ns/op
+CodecBenchmark.parseInsert:gc.alloc.rate                          N/A  avgt    5     2047.065 ±  485.117  MB/sec
+CodecBenchmark.parseInsert:gc.alloc.rate.norm                     N/A  avgt    5     1832.006 ±    0.002    B/op
+CodecBenchmark.parseInsert:gc.count                               N/A  avgt    5       51.000             counts
+CodecBenchmark.parseInsert:gc.time                                N/A  avgt    5       47.000                 ms
+CodecBenchmark.parseSelect                                        N/A  avgt    5      710.242 ±  241.209   ns/op
+CodecBenchmark.parseSelect:gc.alloc.rate                          N/A  avgt    5     2290.415 ±  749.806  MB/sec
+CodecBenchmark.parseSelect:gc.alloc.rate.norm                     N/A  avgt    5     1696.005 ±    0.002    B/op
+CodecBenchmark.parseSelect:gc.count                               N/A  avgt    5       53.000             counts
+CodecBenchmark.parseSelect:gc.time                                N/A  avgt    5       56.000                 ms
+CodecBenchmark.serializeRow                                       N/A  avgt    5      350.166 ±   40.880   ns/op
+CodecBenchmark.serializeRow:gc.alloc.rate                         N/A  avgt    5     1133.499 ±  135.355  MB/sec
+CodecBenchmark.serializeRow:gc.alloc.rate.norm                    N/A  avgt    5      416.002 ±    0.001    B/op
+CodecBenchmark.serializeRow:gc.count                              N/A  avgt    5       28.000             counts
+CodecBenchmark.serializeRow:gc.time                               N/A  avgt    5       29.000                 ms
+PageBenchmark.bufferPoolHit                                       N/A  avgt    5      368.724 ±   51.049   ns/op
+PageBenchmark.bufferPoolHit:gc.alloc.rate                         N/A  avgt    5    10684.413 ± 1477.312  MB/sec
+PageBenchmark.bufferPoolHit:gc.alloc.rate.norm                    N/A  avgt    5     4128.003 ±    0.001    B/op
+PageBenchmark.bufferPoolHit:gc.count                              N/A  avgt    5      103.000             counts
+PageBenchmark.bufferPoolHit:gc.time                               N/A  avgt    5      138.000                 ms
+PageBenchmark.fillSlottedPage                                     N/A  avgt    5     1021.300 ±  148.033   ns/op
+PageBenchmark.fillSlottedPage:gc.alloc.rate                       N/A  avgt    5     3925.279 ±  561.453  MB/sec
+PageBenchmark.fillSlottedPage:gc.alloc.rate.norm                  N/A  avgt    5     4200.007 ±    0.001    B/op
+PageBenchmark.fillSlottedPage:gc.count                            N/A  avgt    5       40.000             counts
+PageBenchmark.fillSlottedPage:gc.time                             N/A  avgt    5       57.000                 ms
+PageBenchmark.pageCopyAlone                                       N/A  avgt    5      427.420 ±  200.246   ns/op
+PageBenchmark.pageCopyAlone:gc.alloc.rate                         N/A  avgt    5     9314.225 ± 4231.267  MB/sec
+PageBenchmark.pageCopyAlone:gc.alloc.rate.norm                    N/A  avgt    5     4128.003 ±    0.001    B/op
+PageBenchmark.pageCopyAlone:gc.count                              N/A  avgt    5       82.000             counts
+PageBenchmark.pageCopyAlone:gc.time                               N/A  avgt    5      111.000                 ms
+PageBenchmark.readAllIntsOfAPage                                  N/A  avgt    5      112.544 ±   13.981   ns/op
+PageBenchmark.readAllIntsOfAPage:gc.alloc.rate                    N/A  avgt    5        0.007 ±    0.001  MB/sec
+PageBenchmark.readAllIntsOfAPage:gc.alloc.rate.norm               N/A  avgt    5        0.001 ±    0.001    B/op
+PageBenchmark.readAllIntsOfAPage:gc.count                         N/A  avgt    5          ≈ 0             counts
+PageBenchmark.readAllRecordsOfASlottedPage                        N/A  avgt    5      695.046 ±  194.799   ns/op
+PageBenchmark.readAllRecordsOfASlottedPage:gc.alloc.rate          N/A  avgt    5     6611.540 ± 1806.609  MB/sec
+PageBenchmark.readAllRecordsOfASlottedPage:gc.alloc.rate.norm     N/A  avgt    5     4800.004 ±    0.003    B/op
+PageBenchmark.readAllRecordsOfASlottedPage:gc.count               N/A  avgt    5       36.000             counts
+PageBenchmark.readAllRecordsOfASlottedPage:gc.time                N/A  avgt    5       54.000                 ms
