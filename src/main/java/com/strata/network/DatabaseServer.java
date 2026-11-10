@@ -118,11 +118,15 @@ public final class DatabaseServer implements AutoCloseable {
     }
 
     private void handleClient(Socket socket) {
+        // The session is closed however the connection ends (QUIT, EOF, socket error): closing a
+        // shared-resource session rolls back any transaction the client left open and releases
+        // its locks. Without this, a client that disconnected mid-transaction held its locks
+        // forever and every other client timed out on those tables until a server restart.
         try (socket;
+             Session session = Session.open(diskManager, bufferPool, lockManager, wal);
              BufferedReader in = new BufferedReader(new InputStreamReader(socket.getInputStream(), StandardCharsets.UTF_8));
              Writer out = new OutputStreamWriter(socket.getOutputStream(), StandardCharsets.UTF_8)) {
 
-            Session session = Session.open(diskManager, bufferPool, lockManager, wal);
             String line;
             while ((line = in.readLine()) != null) {
                 String sql = line.trim();

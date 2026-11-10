@@ -76,7 +76,7 @@ public final class Main {
         System.out.println("StrataDB Embedded Shell (" + (isNew ? "created new" : "opened existing") + " " + dbPath + ")");
         System.out.println("Type SQL statements ending with a semicolon, or 'quit' to exit.\n");
 
-        try (dm; session; Scanner scanner = new Scanner(System.in)) {
+        try (session; Scanner scanner = new Scanner(System.in)) { // session owns dm and closes it
             runRepl(sql -> {
                 ExecutionResult result = session.execute(sql);
                 printExecutionResult(result);

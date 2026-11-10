@@ -21,15 +21,22 @@ import java.util.stream.Collectors;
  *   END
  * </pre>
  *
- * <h2>A deliberate simplification: text, not typed/length-prefixed fields</h2>
- * Values are rendered with plain {@code toString()}, tab-separated, and {@code NULL} is written
- * as the literal text {@code NULL}. This is simple and human-readable — you can talk to
- * StrataDB with nothing more than {@code nc localhost <port>} — but it's genuinely ambiguous: a
- * real {@code VARCHAR} value that happens to contain a tab character, or that happens to be the
- * text {@code "NULL"}, can't be told apart from the protocol's own delimiters. A production wire
- * protocol (PostgreSQL's, for instance) avoids this with typed, length-prefixed binary fields.
- * That's real, valuable future work, traded away here for a protocol simple enough to read by
- * eye and to drive from a bare TCP connection with no client library at all.
+ * <h2>Framing: the row count, not the {@code END} line, delimits a result set</h2>
+ * A client must read exactly the column-header line plus {@code n} row lines after
+ * {@code OK ROWS n}, then the {@code END} line. An earlier client scanned for the first line
+ * equal to {@code END} instead, so a row whose only value was the string {@code 'END'} ended the
+ * response early, and every later response on that connection was off by one.
+ *
+ * <h2>Escaping</h2>
+ * Values are tab-separated, one row per line, so inside a value backslash, tab, newline and
+ * carriage return are escaped as {@code \\}, {@code \t}, {@code \n} and {@code \r} (the same
+ * convention as PostgreSQL's text COPY format). Ordinary values are sent unchanged.
+ *
+ * <h2>Remaining limitation</h2>
+ * {@code NULL} is the literal text {@code NULL}, indistinguishable from a VARCHAR whose value
+ * is the four letters {@code NULL}. A typed, length-prefixed binary protocol removes this and the
+ * parsing cost of text altogether; this text protocol stays because you can drive it from
+ * {@code nc localhost <port>}.
  */
 final class Protocol {
 
@@ -66,7 +73,51 @@ final class Protocol {
             + '\n' + END + '\n';
     }
 
-    private static String encodeValue(Object value) {
-        return value == null ? "NULL" : value.toString();
+    static String encodeValue(Object value) {
+        return value == null ? "NULL" : escape(value.toString());
+    }
+
+    static String escape(String s) {
+        StringBuilder out = null;
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i);
+            String replacement = switch (c) {
+                case '\\' -> "\\\\";
+                case '\t' -> "\\t";
+                case '\n' -> "\\n";
+                case '\r' -> "\\r";
+                default -> null;
+            };
+            if (replacement != null && out == null) {
+                out = new StringBuilder(s.length() + 8).append(s, 0, i);
+            }
+            if (out != null) {
+                if (replacement != null) out.append(replacement); else out.append(c);
+            }
+        }
+        return out == null ? s : out.toString();
+    }
+
+    /** Inverse of {@link #escape}, for clients that want the original value back. */
+    public static String unescape(String s) {
+        if (s.indexOf('\\') < 0) {
+            return s;
+        }
+        StringBuilder out = new StringBuilder(s.length());
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i);
+            if (c == '\\' && i + 1 < s.length()) {
+                char next = s.charAt(++i);
+                out.append(switch (next) {
+                    case 't' -> '\t';
+                    case 'n' -> '\n';
+                    case 'r' -> '\r';
+                    default -> next;
+                });
+            } else {
+                out.append(c);
+            }
+        }
+        return out.toString();
     }
 }

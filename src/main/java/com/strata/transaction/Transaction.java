@@ -89,16 +89,73 @@ public final class Transaction implements PageStore {
         this.wal = wal;
     }
 
+    // ---- statement-level savepoint ----
+    //
+    // A statement that fails halfway (e.g. UPDATE deletes a row, then can't re-insert it) must
+    // leave no trace, or COMMIT would apply half a statement. While a statement is active, the
+    // first time it touches a page that's already in the overlay, the page's prior image is
+    // saved here; rollbackStatement() puts those images back. Each page is copied at most once
+    // per statement. The image must be captured on *read*, not just on write: readPage hands
+    // out the live overlay object, and callers (HeapTable, SlottedPage) mutate it in place
+    // before calling writePage.
+
+    /** Marks "this page wasn't in the overlay before the statement" (compared by identity). */
+    private static final Page ABSENT = new Page();
+
+    private final Map<Integer, Page> statementUndo = new HashMap<>();
+    private boolean statementActive = false;
+
+    /** Starts a savepoint covering the next statement. */
+    public void beginStatement() {
+        requireActive();
+        statementUndo.clear();
+        statementActive = true;
+    }
+
+    /** Keeps everything the current statement did. */
+    public void commitStatement() {
+        statementUndo.clear();
+        statementActive = false;
+    }
+
+    /**
+     * Restores the overlay to exactly what it was at {@link #beginStatement()}. Page ids the
+     * statement allocated stay reserved (and leaked), as with a full rollback.
+     */
+    public void rollbackStatement() {
+        for (Map.Entry<Integer, Page> entry : statementUndo.entrySet()) {
+            if (entry.getValue() == ABSENT) {
+                overlay.remove(entry.getKey());
+            } else {
+                overlay.put(entry.getKey(), entry.getValue());
+            }
+        }
+        statementUndo.clear();
+        statementActive = false;
+    }
+
+    private void rememberBeforeImage(int pageId) {
+        if (statementActive && !statementUndo.containsKey(pageId)) {
+            Page current = overlay.get(pageId);
+            statementUndo.put(pageId, current == null ? ABSENT : current.copy());
+        }
+    }
+
     @Override
     public Page readPage(int pageId) throws IOException {
         requireActive();
         Page buffered = overlay.get(pageId);
-        return (buffered != null) ? buffered : underlying.readPage(pageId);
+        if (buffered != null) {
+            rememberBeforeImage(pageId); // the caller may mutate this live object in place
+            return buffered;
+        }
+        return underlying.readPage(pageId); // BufferPool/DiskManager hand out private copies
     }
 
     @Override
     public void writePage(int pageId, Page page) throws IOException {
         requireActive();
+        rememberBeforeImage(pageId);
         overlay.put(pageId, page); // buffered only — nothing touches the real store until commit()
     }
 
@@ -121,6 +178,7 @@ public final class Transaction implements PageStore {
     public int allocatePage() throws IOException {
         requireActive();
         int newPageId = underlying.allocatePage();
+        rememberBeforeImage(newPageId);
         overlay.put(newPageId, new Page());
         allocatedPageIds.add(newPageId);
         return newPageId;
@@ -132,6 +190,7 @@ public final class Transaction implements PageStore {
         requireActive();
         int first = underlying.allocatePages(count);
         for (int i = 0; i < count; i++) {
+            rememberBeforeImage(first + i);
             overlay.put(first + i, new Page());
             allocatedPageIds.add(first + i);
         }

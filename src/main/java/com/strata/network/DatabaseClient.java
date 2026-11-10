@@ -35,14 +35,33 @@ public final class DatabaseClient implements AutoCloseable {
         out.flush();
 
         List<String> lines = new ArrayList<>();
-        String line;
-        while ((line = in.readLine()) != null) {
-            if (line.equals(Protocol.END)) {
-                break;
+        String first = readLineOrThrow();
+        lines.add(first);
+        if (first.startsWith("OK ROWS ")) {
+            // Framed by count, not by scanning for END: a row may legitimately read "END".
+            int rowCount = Integer.parseInt(first.substring("OK ROWS ".length()).trim());
+            for (int i = 0; i < rowCount + 1; i++) { // the column-header line, then each row
+                lines.add(readLineOrThrow());
             }
+            String end = readLineOrThrow();
+            if (!end.equals(Protocol.END)) {
+                throw new IOException("Protocol error: expected END after " + rowCount + " rows, got: " + end);
+            }
+            return lines;
+        }
+        String line;
+        while (!(line = readLineOrThrow()).equals(Protocol.END)) {
             lines.add(line);
         }
         return lines;
+    }
+
+    private String readLineOrThrow() throws IOException {
+        String line = in.readLine();
+        if (line == null) {
+            throw new IOException("Server closed the connection mid-response");
+        }
+        return line;
     }
 
     public void quit() throws IOException {

@@ -90,14 +90,17 @@ public final class Session implements AutoCloseable {
     private final BufferPool bufferPool;
     private final LockManager lockManager;
     private final WriteAheadLog wal;
+    private final boolean ownsResources;
     private Transaction activeTransaction;
     private Executor activeExecutor;
 
-    private Session(DiskManager diskManager, BufferPool bufferPool, LockManager lockManager, WriteAheadLog wal) {
+    private Session(DiskManager diskManager, BufferPool bufferPool, LockManager lockManager, WriteAheadLog wal,
+                    boolean ownsResources) {
         this.diskManager = diskManager;
         this.bufferPool = bufferPool;
         this.lockManager = lockManager;
         this.wal = wal;
+        this.ownsResources = ownsResources;
     }
 
     /** The WAL file path StrataDB uses for a given database file — always alongside it, with a {@code .wal} suffix. */
@@ -121,7 +124,8 @@ public final class Session implements AutoCloseable {
     public static Session bootstrap(DiskManager diskManager) throws IOException {
         Files.deleteIfExists(walPathFor(diskManager)); // brand-new database: any stale WAL debris is irrelevant
         WriteAheadLog wal = WriteAheadLog.open(walPathFor(diskManager));
-        return bootstrap(diskManager, new BufferPool(diskManager, DEFAULT_BUFFER_POOL_CAPACITY), new LockManager(), wal);
+        Catalog.bootstrap(diskManager);
+        return new Session(diskManager, new BufferPool(diskManager, DEFAULT_BUFFER_POOL_CAPACITY), new LockManager(), wal, true);
     }
 
     /**
@@ -132,18 +136,18 @@ public final class Session implements AutoCloseable {
      */
     public static Session bootstrap(DiskManager diskManager, BufferPool bufferPool, LockManager lockManager, WriteAheadLog wal) throws IOException {
         Catalog.bootstrap(diskManager); // a one-time, directly-against-disk setup step — see Catalog's own docs
-        return new Session(diskManager, bufferPool, lockManager, wal);
+        return new Session(diskManager, bufferPool, lockManager, wal, false);
     }
 
     /** Opens a session against an existing database file with its own private buffer pool, lock manager, and WAL — running recovery first. */
     public static Session open(DiskManager diskManager) throws IOException {
         WriteAheadLog wal = prepareWal(diskManager);
-        return open(diskManager, new BufferPool(diskManager, DEFAULT_BUFFER_POOL_CAPACITY), new LockManager(), wal);
+        return new Session(diskManager, new BufferPool(diskManager, DEFAULT_BUFFER_POOL_CAPACITY), new LockManager(), wal, true);
     }
 
     /** Opens a session against an existing database file, sharing {@code bufferPool}, {@code lockManager}, and {@code wal}. */
     public static Session open(DiskManager diskManager, BufferPool bufferPool, LockManager lockManager, WriteAheadLog wal) {
-        return new Session(diskManager, bufferPool, lockManager, wal);
+        return new Session(diskManager, bufferPool, lockManager, wal, false);
     }
 
     public ExecutionResult execute(String sql) throws IOException {
@@ -157,55 +161,115 @@ public final class Session implements AutoCloseable {
         }
         if (statement instanceof Statement.Commit) {
             requireActiveTransaction();
-            activeTransaction.commit();
-            bufferPool.flushAll(); // FORCE: make this commit durable before acknowledging it
-            lockManager.releaseAll(activeTransaction);
-            clearActiveTransaction();
+            Transaction txn = activeTransaction;
+            try {
+                txn.commit();
+                bufferPool.flushAll(); // FORCE: make this commit durable before acknowledging it
+            } finally {
+                lockManager.releaseAll(txn);
+                clearActiveTransaction();
+            }
             return new ExecutionResult.TransactionCommitted();
         }
         if (statement instanceof Statement.Rollback) {
             requireActiveTransaction();
-            activeTransaction.rollback();
-            lockManager.releaseAll(activeTransaction);
-            clearActiveTransaction();
+            rollbackActiveTransaction();
             return new ExecutionResult.TransactionRolledBack();
         }
 
         LockRequest lockRequest = lockRequestFor(statement);
 
         if (activeTransaction != null) {
-            // Inside an explicit transaction: acquire the locks under the *transaction's*
-            // identity so they're held until COMMIT/ROLLBACK releases everything at once, not
-            // released after just this one statement.
-            acquireLocks(activeTransaction, lockRequest);
-            if (activeExecutor == null) {
-                // First statement of this transaction: only now, with the catalog lock held,
-                // is it safe to load the catalog (see the class docs on catalog locking).
-                activeExecutor = new Executor(Catalog.open(activeTransaction));
-            }
-            return activeExecutor.execute(statement);
+            return executeInExplicitTransaction(statement, lockRequest);
         }
 
         // Autocommit: this one statement gets its own transaction, its locks held only for its
-        // own duration, applied and made durable immediately.
+        // own duration, applied and made durable immediately — or, on any failure, discarded.
         Transaction txn = new Transaction(bufferPool, wal);
-        acquireLocks(txn, lockRequest);
+        boolean committed = false;
         try {
+            acquireLocks(txn, lockRequest);
             Executor executor = new Executor(Catalog.open(txn));
             ExecutionResult result = executor.execute(statement);
             txn.commit();
+            committed = true;
             bufferPool.flushAll(); // FORCE, same as the explicit-transaction path above
             return result;
         } finally {
+            if (!committed) {
+                txn.rollback();
+            }
             lockManager.releaseAll(txn);
         }
     }
 
+    /**
+     * Runs one statement inside the open explicit transaction with <b>statement-level
+     * atomicity</b>: if it fails for any reason (bad value, lock timeout, I/O error), every page
+     * change it made is undone and the transaction stays open with exactly the state it had
+     * before the statement, so the client can retry, continue, or ROLLBACK. (This is the
+     * MySQL/Oracle behaviour; PostgreSQL instead aborts the whole transaction.) Locks the failed
+     * statement acquired stay held, as strict 2PL requires.
+     */
+    private ExecutionResult executeInExplicitTransaction(Statement statement, LockRequest lockRequest) throws IOException {
+        Transaction txn = activeTransaction;
+        txn.beginStatement();
+        boolean succeeded = false;
+        try {
+            // Locks are taken under the transaction's identity, so they're held until
+            // COMMIT/ROLLBACK, not released after just this one statement.
+            acquireLocks(txn, lockRequest);
+            if (activeExecutor == null) {
+                // First statement of this transaction: only now, with the catalog lock held,
+                // is it safe to load the catalog (see the class docs on catalog locking).
+                activeExecutor = new Executor(Catalog.open(txn));
+            }
+            ExecutionResult result = activeExecutor.execute(statement);
+            succeeded = true;
+            return result;
+        } finally {
+            if (succeeded) {
+                txn.commitStatement();
+            } else {
+                txn.rollbackStatement();
+                // The executor's in-memory catalog may have recorded a table or index whose
+                // pages were just rolled back; reload it from the overlay on the next statement.
+                activeExecutor = null;
+            }
+        }
+    }
+
+    /**
+     * Ends this session: rolls back any open transaction and releases its locks (essential when a
+     * network client disconnects mid-transaction — otherwise its locks would be held forever).
+     * The database resources (disk file, buffer pool, WAL) are flushed and closed only if this
+     * session created them itself; sessions sharing them with others leave them open.
+     */
     @Override
     public void close() throws IOException {
-        bufferPool.flushAll(); // defensive: every commit already flushes, so this should be a no-op in practice
-        diskManager.close();
-        wal.close();
+        if (activeTransaction != null) {
+            rollbackActiveTransaction();
+        }
+        if (ownsResources) {
+            bufferPool.flushAll(); // defensive: every commit already flushes, so this should be a no-op in practice
+            diskManager.close();
+            wal.close();
+        }
+    }
+
+    /** True while an explicit transaction ({@code BEGIN} ... ) is open. */
+    public boolean inTransaction() {
+        return activeTransaction != null;
+    }
+
+    private void rollbackActiveTransaction() {
+        Transaction txn = activeTransaction;
+        try {
+            txn.rollback();
+        } finally {
+            lockManager.releaseAll(txn);
+            clearActiveTransaction();
+        }
     }
 
     private void beginTransaction() throws IOException {
