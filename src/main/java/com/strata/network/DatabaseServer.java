@@ -1,10 +1,7 @@
 package com.strata.network;
 
-import com.strata.buffer.BufferPool;
+import com.strata.engine.Database;
 import com.strata.executor.ExecutionResult;
-import com.strata.lock.LockManager;
-import com.strata.recovery.WriteAheadLog;
-import com.strata.storage.page.DiskManager;
 import com.strata.transaction.Session;
 
 import java.io.BufferedReader;
@@ -15,7 +12,6 @@ import java.io.Writer;
 import java.net.ServerSocket;
 import java.net.Socket;
 import java.nio.charset.StandardCharsets;
-import java.nio.file.Files;
 import java.nio.file.Path;
 
 /**
@@ -40,22 +36,13 @@ import java.nio.file.Path;
  */
 public final class DatabaseServer implements AutoCloseable {
 
-    private static final int DEFAULT_BUFFER_POOL_CAPACITY = 64;
-
     private final ServerSocket serverSocket;
-    private final DiskManager diskManager;
-    private final BufferPool bufferPool;
-    private final LockManager lockManager;
-    private final WriteAheadLog wal;
+    private final Database database;
     private volatile boolean running = true;
 
-    private DatabaseServer(ServerSocket serverSocket, DiskManager diskManager, BufferPool bufferPool,
-                            LockManager lockManager, WriteAheadLog wal) {
+    private DatabaseServer(ServerSocket serverSocket, Database database) {
         this.serverSocket = serverSocket;
-        this.diskManager = diskManager;
-        this.bufferPool = bufferPool;
-        this.lockManager = lockManager;
-        this.wal = wal;
+        this.database = database;
     }
 
     /**
@@ -64,28 +51,26 @@ public final class DatabaseServer implements AutoCloseable {
      * {@link #getPort()} to find out which.
      */
     public static DatabaseServer start(Path dbFile, int port) throws IOException {
-        return start(dbFile, port, new LockManager());
+        return start(dbFile, port, Database.Options.defaults());
     }
 
-    /** Like {@link #start(Path, int)}, but with an explicit {@link LockManager} — mainly for tests that want a short lock timeout. */
-    public static DatabaseServer start(Path dbFile, int port, LockManager lockManager) throws IOException {
-        boolean isNew = !Files.exists(dbFile) || Files.size(dbFile) == 0;
-        DiskManager diskManager = new DiskManager(dbFile);
-
-        WriteAheadLog wal = isNew
-            ? WriteAheadLog.open(Session.walPathFor(diskManager))
-            : Session.prepareWal(diskManager); // recovers before anything else touches the file
-
-        BufferPool bufferPool = new BufferPool(diskManager, DEFAULT_BUFFER_POOL_CAPACITY);
-
-        if (isNew) {
-            Session.bootstrap(diskManager, bufferPool, lockManager, wal); // only needed to run Catalog.bootstrap once
+    /** Like {@link #start(Path, int)}, with explicit options (tests use a short lock timeout). */
+    public static DatabaseServer start(Path dbFile, int port, Database.Options options) throws IOException {
+        Database database = Database.open(dbFile, options);
+        try {
+            ServerSocket serverSocket = new ServerSocket(port);
+            DatabaseServer server = new DatabaseServer(serverSocket, database);
+            server.startAcceptLoop();
+            return server;
+        } catch (IOException | RuntimeException e) {
+            database.close();
+            throw e;
         }
+    }
 
-        ServerSocket serverSocket = new ServerSocket(port);
-        DatabaseServer server = new DatabaseServer(serverSocket, diskManager, bufferPool, lockManager, wal);
-        server.startAcceptLoop();
-        return server;
+    /** The database this server serves. */
+    public Database database() {
+        return database;
     }
 
     /** The actual port this server is listening on — useful when constructed with port {@code 0}. */
@@ -123,7 +108,7 @@ public final class DatabaseServer implements AutoCloseable {
         // its locks. Without this, a client that disconnected mid-transaction held its locks
         // forever and every other client timed out on those tables until a server restart.
         try (socket;
-             Session session = Session.open(diskManager, bufferPool, lockManager, wal);
+             Session session = database.newSession();
              BufferedReader in = new BufferedReader(new InputStreamReader(socket.getInputStream(), StandardCharsets.UTF_8));
              Writer out = new OutputStreamWriter(socket.getOutputStream(), StandardCharsets.UTF_8)) {
 
@@ -154,8 +139,6 @@ public final class DatabaseServer implements AutoCloseable {
     public void close() throws IOException {
         running = false;
         serverSocket.close();
-        bufferPool.flushAll();
-        diskManager.close();
-        wal.close();
+        database.close();
     }
 }

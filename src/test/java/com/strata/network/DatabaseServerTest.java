@@ -110,7 +110,7 @@ public class DatabaseServerTest {
     public void testOneClientsOpenTransactionBlocksAnotherClientsWrite() throws IOException {
         Path tmp = Files.createTempFile("stratadb-network-test", ".db");
         Files.deleteIfExists(tmp);
-        try (DatabaseServer server = DatabaseServer.start(tmp, 0, new LockManager(300))) {
+        try (DatabaseServer server = DatabaseServer.start(tmp, 0, com.strata.engine.Database.Options.defaults().withLockTimeoutMillis(300))) {
             try (DatabaseClient setup = connect(server)) {
                 setup.execute("CREATE TABLE t (id INTEGER);");
             }

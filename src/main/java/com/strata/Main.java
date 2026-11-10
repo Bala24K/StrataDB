@@ -3,11 +3,10 @@ package com.strata;
 import com.strata.executor.ExecutionResult;
 import com.strata.network.DatabaseClient;
 import com.strata.network.DatabaseServer;
-import com.strata.storage.page.DiskManager;
+import com.strata.engine.Database;
 import com.strata.transaction.Session;
 
 import java.io.IOException;
-import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
 import java.util.Scanner;
@@ -69,14 +68,13 @@ public final class Main {
         }
 
         Path dbPath = Path.of(args[1]);
-        boolean isNew = !Files.exists(dbPath) || Files.size(dbPath) == 0;
-        DiskManager dm = new DiskManager(dbPath);
-        Session session = isNew ? Session.bootstrap(dm) : Session.open(dm);
+        Database database = Database.open(dbPath);
+        Session session = database.newSession();
 
-        System.out.println("StrataDB Embedded Shell (" + (isNew ? "created new" : "opened existing") + " " + dbPath + ")");
+        System.out.println("StrataDB Embedded Shell (" + (database.wasCreated() ? "created new" : "opened existing") + " " + dbPath + ")");
         System.out.println("Type SQL statements ending with a semicolon, or 'quit' to exit.\n");
 
-        try (session; Scanner scanner = new Scanner(System.in)) { // session owns dm and closes it
+        try (database; session; Scanner scanner = new Scanner(System.in)) {
             runRepl(sql -> {
                 ExecutionResult result = session.execute(sql);
                 printExecutionResult(result);

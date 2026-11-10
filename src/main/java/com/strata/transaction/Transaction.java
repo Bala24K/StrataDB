@@ -210,13 +210,14 @@ public final class Transaction implements PageStore {
     /** Applies every buffered write to the underlying store, in page-id order, and fsyncs it. */
     public void commit() throws IOException {
         requireActive();
+        finished = true; // whatever happens below, this transaction can't be used again
         if (wal != null && !overlay.isEmpty()) {
-            // Durably logged BEFORE any of these writes reach the real store — this ordering
-            // is what makes it possible to finish an interrupted commit after a crash.
-            wal.logCommit(overlay);
+            // Logged durably BEFORE any of these writes reach the real store, and applied under
+            // the same lock so log order == apply order (see WriteAheadLog.commit).
+            wal.commit(overlay, underlying);
+        } else {
+            PageStores.applyAll(underlying, overlay);
         }
-        PageStores.applyAll(underlying, overlay);
-        finished = true;
     }
 
     /** Discards every buffered write. Since nothing was ever applied to the underlying store, there's nothing to undo. */
