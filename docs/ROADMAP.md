@@ -10,11 +10,11 @@ Status legend: ✅ done · 🚧 in progress · ⏳ not started
 | 3     | SQL Lexer         | SQL text → tokens                                          | ✅     |
 | 4     | SQL Parser        | Tokens → AST (CREATE TABLE, INSERT, UPDATE, DELETE, SELECT) | ✅     |
 | 5     | Query Executor    | AST → plan → rows (WHERE, ORDER BY, LIMIT; no joins yet)  | ✅     |
-| 6     | Indexes           | Hash index, then B+Tree (search/insert/delete/split/merge) | 🚧     |
+| 6     | Indexes           | Hash index, then B+Tree (search/insert/delete/split; no merge) | ✅     |
 | 7     | Transactions      | BEGIN / COMMIT / ROLLBACK; ACID                             | ✅     |
 | 8     | Lock Manager      | Shared/exclusive locks; safe concurrent access              | ✅     |
 | 9     | Buffer Pool       | In-RAM page cache, LRU eviction, dirty-page tracking        | ✅     |
-| 10    | Query Optimizer   | Logical plan → cost estimation → physical plan              | ✅     |
+| 10    | Query Optimizer   | Rule-based physical plan: full scan / index lookup / range  | ✅     |
 | 11    | Recovery          | Write-ahead log; crash → replay → recover                   | ✅     |
 | 12    | Networking        | TCP server; multiple concurrent clients                     | ✅     |
 | 13    | Authentication    | Users, roles, permissions, passwords                        | ⏳     |
@@ -186,3 +186,16 @@ Each milestone below is meant to be a tagged, working release — not a finished
   `LockState` once created. 10 new unit tests (236 total), including the one that found the bug
   and one proving data persists across a full server restart. Write-up:
   [`docs/phase12-networking.md`](phase12-networking.md).
+
+- **Engineering upgrade (2026-11), branch `upgrade/roadmap`.** An audit of the whole engine
+  ([`AUDIT.md`](AUDIT.md)) found and reproduced six correctness bugs, the worst being concurrent
+  transactions allocating the same page id (cross-table corruption, and an infinite loop under
+  concurrent inserts), and showed `mvn test` ran none of the tests. The upgrade, one commit per
+  step: T0 tests under Maven + CI; T1 shared page allocation; T2 catalog locking; T3 statement
+  savepoints, disconnect cleanup, protocol framing; T4 WAL hardening, `Database` facade, crash
+  injection and process-kill tests; T5 metrics, JMH + workload benchmark harness, baseline;
+  T6 no-force commits, group commit, checkpoints, WAL format v2; T7 insert tail hint, in-place
+  UPDATE, page compaction; T8 B+Tree index and range planner (Phase 6 complete); T9 push-based
+  execution with in-place row decoding; T10 FIFO lock queues and deadlock detection; T11
+  protocol measured (binary protocol not justified) and NULL ambiguity fixed. 236 → ~300 tests.
+  Design: [`ENGINE.md`](ENGINE.md); measurements and methodology: [`BENCHMARKS.md`](BENCHMARKS.md).

@@ -296,3 +296,35 @@ small queries is fewer round trips (pipelining or batching statements), recorded
 What did change in T11: the protocol's last ambiguity is fixed (a VARCHAR whose value is the
 string `NULL` is sent as `\NULL`, so it can't be confused with SQL NULL), and the benchmark
 harness gained the two network scenarios above.
+
+## Final validation
+
+The baseline build (`66fdd80`: engine as of `44283ed`, plus the harness) and the final build
+were run **interleaved** — baseline, final, baseline, final — so machine drift affects both
+equally. Raw output: `bench-results/final-ab-{baseline,final}-r{1,2}`. Values are round 1 /
+round 2 (each a median of 3 runs).
+
+| scenario | baseline ops/s | final ops/s | speed-up | p99 µs (baseline → final) |
+|---|---:|---:|---:|---:|
+| insert_autocommit | 753 / 487 | 1,462 / 1,413 | **~2–3×** | 2,680–4,077 → 1,085–1,401 |
+| insert_batched (rows/s) | 10,456 / 7,419 | 158,649 / 122,084 | **~15×** | 103,002–108,796 → 4,531–7,505 (per 500-row txn) |
+| point_lookup_index | 9,243 / 9,272 | 62,561 / 85,372 | **~7–9×** | 259–274 → 41–57 |
+| range_query (100 rows) | 148 / 169 | 12,868 / 14,646 | **~87×** | 10,073–11,787 → 298–345 |
+| full_scan (rows/s) | 3.7 M / 3.0 M | 5.4 M / 8.4 M | ~1.5–2.8× (noisy) | — |
+| update_indexed | 225 / 286 | 1,335 / 1,040 | **~4–6×** | 5,162–7,447 → 1,194–2,354 |
+| concurrent_insert_own_table_t8 | 691 / 797 | 3,228 / 3,156 | **~4–5×** | 24,670–28,066 → 4,949–5,029 |
+| concurrent_insert_same_table_t8 | 523 / 700 | 1,035 / 1,044 | ~1.5–2× | 178,636–234,634 → 11,620–11,753 |
+| mixed_80read_20write_t8 | 1,640 / 1,942 | 3,998 / 4,696 | **~2.4×** | 71,045–85,557 → 5,405–5,922 |
+
+Maximum latency in the contended scenarios: same-table writers 1.45–1.83 s → 13 ms;
+mixed workload 0.28–0.30 s → 12–16 ms. WAL bytes per indexed update: 16,330 → 4,136.
+
+What did **not** improve, and why:
+
+- **Single-table write throughput** is still bounded by one commit fsync at a time
+  (strict 2PL holds the table's X lock through the commit). Its *tail* improved dramatically;
+  its throughput only modestly.
+- **Write amplification for inserts** is unchanged at ~4.2 KB of log per small commit (full page
+  images); see `AUDIT.md`, "Not done".
+- **Median latency under contention rose** (e.g. same-table writers p50 ~3 ms → ~7.6 ms): the
+  FIFO lock queues trade median for a bounded tail (see T10).

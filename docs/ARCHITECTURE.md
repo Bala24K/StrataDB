@@ -50,28 +50,31 @@ in-memory fake of the storage interface.
 
 ## Module map (package → responsibility)
 
-| Package (`com.strata.…`)     | Responsibility                                             | Status        |
-|-------------------------------|-------------------------------------------------------------|---------------|
-| `storage.page`                 | Fixed-size pages; page id ↔ byte offset; raw disk I/O       | ✅ Phase 0     |
-| `storage` (records, tables)    | Tables/records laid out inside pages; free space tracking   | ✅ Phase 1     |
-| `catalog`                      | System catalog: tables, columns, types, indexes             | ✅ Phase 2     |
-| `lexer`                        | SQL text → token stream                                     | ✅ Phase 3     |
-| `parser`                       | Token stream → AST                                          | ✅ Phase 4     |
-| `executor` / `planner`         | AST → execution plan → rows                                 | ✅ Phase 5     |
-| `index.hash`, `index.btree`    | Hash index, then B+Tree index                                | 🚧 Phase 6 (hash index done; B+Tree pending) |
-| `transaction`                  | BEGIN/COMMIT/ROLLBACK, ACID bookkeeping                     | ✅ Phase 7     |
-| `lock`                         | Shared/exclusive lock manager                                | ✅ Phase 8     |
-| `buffer`                       | In-memory page cache with LRU eviction, dirty-page tracking  | ✅ Phase 9     |
-| `optimizer`                    | Cost-based physical plan selection                            | ✅ Phase 10 (rule-based, not yet cost-based) |
-| `recovery`                     | Write-ahead log, crash recovery                              | ✅ Phase 11    |
-| `network`                      | TCP server, wire protocol, multiple clients                  | ✅ Phase 12    |
-| `transaction`                  | BEGIN/COMMIT/ROLLBACK, ACID bookkeeping                     | ⏳ Phase 7     |
-| `lock`                         | Shared/exclusive lock manager                                | ⏳ Phase 8     |
-| `buffer`                       | In-memory page cache with LRU eviction, dirty-page tracking  | ⏳ Phase 9     |
-| `optimizer`                    | Cost-based physical plan selection                          | ⏳ Phase 10    |
-| `recovery`                     | Write-ahead log, crash recovery                              | ⏳ Phase 11    |
-| `network`                      | TCP server, wire protocol, multiple clients                  | ⏳ Phase 12    |
-| `security`                     | Users, roles, permissions                                    | ⏳ Phase 13    |
+> **Current state.** This file describes how the modules fit together and how they were built
+> phase by phase. For how the engine works *now* (after the 2026-11 engineering upgrade: no-force
+> group-commit WAL, B+Tree indexes, FIFO lock manager, streaming execution) read
+> [`ENGINE.md`](ENGINE.md); for what changed and why, [`AUDIT.md`](AUDIT.md); for measurements,
+> [`BENCHMARKS.md`](BENCHMARKS.md). The per-phase sections below are kept as the build history.
+
+| Package (`com.strata.…`)     | Responsibility                                                         | Status |
+|-------------------------------|-------------------------------------------------------------------------|--------|
+| `storage.page`                 | Fixed-size pages; page id ↔ byte offset; raw disk I/O; `PageStore` seam | ✅ |
+| `storage`                      | Slotted pages, heap files (tail hint, in-place update, compaction)      | ✅ |
+| `catalog`                      | System catalog: tables, columns, types, indexes (tagged records)        | ✅ |
+| `lexer`, `parser`              | SQL text → tokens → AST                                                 | ✅ |
+| `executor`                     | Push pipeline: access path → decode in place → filter → collect         | ✅ |
+| `optimizer`                    | Rule-based planner: full scan / index lookup / B+Tree range             | ✅ (rule-based, no statistics) |
+| `index`                        | `SecondaryIndex` interface                                              | ✅ |
+| `index.hash`                   | Static-bucket hash index                                                | ✅ (no resizing) |
+| `index.btree`                  | B+Tree over numeric keys: point and range lookups                      | ✅ |
+| `transaction`                  | Page-overlay transactions, statement savepoints, `Session`              | ✅ |
+| `lock`                         | S/X locks, FIFO queues, deadlock detection                              | ✅ |
+| `buffer`                       | LRU page cache, lazy write-back                                         | ✅ |
+| `recovery`                     | WAL: no-force, group commit, checkpoints, redo recovery                 | ✅ |
+| `engine`                       | `Database`: opens/recovers a file, owns the shared components           | ✅ |
+| `metrics`                      | Engine counters for benchmarks (fsyncs, WAL bytes, hits, lock waits)    | ✅ |
+| `network`                      | TCP server, text wire protocol, client                                  | ✅ |
+| `security`                     | Users, roles, permissions                                               | ⏳ not started |
 
 Later phases (replication, distribution, ML-assisted optimization) build on top of everything
 above and aren't part of the initial module map — see `docs/ROADMAP.md`.
@@ -195,3 +198,18 @@ Every module gets unit tests that exercise it in isolation (see `src/test/java`,
 `src/main/java` package-for-package). As the stack grows, we'll add integration tests that
 exercise multiple layers together (e.g. "insert a row through SQL, verify the bytes on disk"),
 but the unit tests are what let each phase be developed and trusted independently.
+
+Since the 2026-11 upgrade the suite also contains:
+
+- **Regression tests** for every bug the audit reproduced (`ConcurrencyRegressionTest`,
+  `TransactionLifecycleTest`, `ServerRegressionTest`).
+- **Randomized model tests**: the B+Tree against a sorted-set model with full structural
+  verification (`BPlusTreeTest`); index range queries against full scans (`RangePlanTest`);
+  the in-place row decoder against the stream decoder (`ExecutionPipelineTest`).
+- **Crash tests**: injected (and torn) data-file write failures in every phase, checked against
+  a model of acknowledged commits (`CrashInjectionTest`), and a real `kill -9` of a child JVM
+  (`ProcessKillTest`).
+- **Concurrency tests** for group commit, FIFO fairness and deadlock detection.
+
+`mvn test` runs everything through a JUnit 5 bridge (`src/test-junit/java`); the dependency-free
+`scripts/run-tests.*` run the same classes. CI runs `mvn verify` on Linux and Windows.

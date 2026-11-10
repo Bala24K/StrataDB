@@ -25,33 +25,57 @@ which is what the name is getting at.
 
 ## Status
 
-Currently on **Phase 13 — Authentication** (users, roles, permissions — the last piece needed
-before "multiple clients" from Phase 12 also means "multiple people who shouldn't all have the
-same access"). Phase 12 (a real TCP server; also where the most serious bug in the project so
-far — a latent race in Phase 8's `LockManager`, only surfaced by genuine multi-client
-contention — was found and fixed) is done, on top of Phase 11 (a Write-Ahead Log), Phase 10 (a
-real query planner), Phase 9 (a buffer pool), Phase 8 (concurrent access), Phase 7 (real
-transactions), and the full SQL pipeline (Phases 0 through 5). See
-[`docs/ROADMAP.md`](docs/ROADMAP.md) for the full phase-by-phase plan and current progress,
-and [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for how the modules fit together.
+Phases 0–12 are complete: storage engine, catalog, SQL lexer/parser, executor, hash and B+Tree
+indexes, transactions, locking, buffer pool, rule-based planner, write-ahead log with crash
+recovery, and a multi-client TCP server. Authentication (Phase 13) is **not** implemented.
 
-Each phase's concepts are written up in `docs/phaseN-*.md` as we go — read those alongside the
-code; they're meant to explain *why* the code looks the way it does, not just what it does.
+A **2026-11 engineering upgrade** audited the whole engine, fixed six reproduced correctness
+bugs (including concurrent transactions corrupting each other's pages), then improved
+performance step by step, measuring every change:
+
+| What | Before | After |
+|---|---|---|
+| Fsyncs per commit | 2–5 (WAL + each dirty page) | 1, shared across concurrent committers (group commit) |
+| Concurrent writers, 8 threads, separate tables | flat (no scaling) | scales with threads |
+| Indexed lookup at 100k rows (JMH) | 388 µs (static hash) | 2.8 µs (B+Tree) |
+| 100-key range query | full table scan | B+Tree range scan |
+| Lock contention tail (8 writers, one table) | p99 ~120 ms, max ~0.7 s | p99 ~13 ms, max ~15 ms |
+| Tests | 236 (none run by `mvn test`) | ~300, run by Maven and CI, incl. crash and kill tests |
+
+See the interleaved before/after comparison in [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md#final-validation).
+
+**Documentation**
+
+- [`docs/ENGINE.md`](docs/ENGINE.md): how the engine works now (storage format, indexes,
+  execution, concurrency model, WAL and recovery, guarantees).
+- [`docs/AUDIT.md`](docs/AUDIT.md): the audit findings, what was fixed, the decisions made,
+  and known limitations.
+- [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md): methodology, results for every step, noise floor.
+- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) and [`docs/ROADMAP.md`](docs/ROADMAP.md): module
+  map and phase-by-phase build history; `docs/phaseN-*.md` explain each phase's concepts.
 
 ## Project layout
 
 ```
 StrataDB/
-  pom.xml                    Maven build (for use on a real machine with internet access)
-  docs/                       Architecture notes, roadmap, per-phase deep dives
-  scripts/                    Sandbox-friendly build/test scripts (see note below)
-  src/main/java/com/strata/   Production code, organized by module
-  src/test/java/com/strata/   Tests, mirroring the main source tree
+  pom.xml                       Maven build; `bench` profile adds JMH
+  docs/                         Engine internals, audit, benchmarks, architecture, roadmap, phase notes
+  scripts/                      Build/test scripts (no Maven needed) and benchmark runners
+  src/main/java/com/strata/     Production code, organized by module
+  src/test/java/com/strata/     Tests, mirroring the main source tree
+  src/test-junit/java/          JUnit 5 bridge so `mvn test` runs the whole suite
+  src/bench/java/               JMH microbenchmarks and the end-to-end workload harness
+  bench-results/                Raw output of every recorded benchmark run
 ```
 
 ### Running the Test Suite
 
-The test suite runs using `com.strata.testutil.TestRunner`, running 236 unit and integration tests across all engine layers.
+```bash
+mvn test
+```
+
+This runs every test class (unit, regression, randomized model, crash-injection and
+process-kill tests) through a JUnit 5 bridge. The same classes also run without Maven:
 
 **On Windows (PowerShell):**
 ```powershell
@@ -68,6 +92,16 @@ java -cp "out/classes;out/test-classes" com.strata.testutil.TestRunner
 ```bash
 ./scripts/run-tests.sh
 ```
+
+### Running the Benchmarks
+
+```bash
+scripts/bench.sh workload --scale medium --runs 3 --label my-run   # end-to-end SQL workloads
+scripts/bench.sh jmh -prof gc                                     # JMH microbenchmarks
+```
+
+(`powershell -File scripts/bench.ps1 ...` on Windows.) Methodology and every recorded result
+are in [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md).
 
 ## Running the Database
 
