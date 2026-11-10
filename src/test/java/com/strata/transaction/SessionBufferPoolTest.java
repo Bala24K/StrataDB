@@ -15,41 +15,69 @@ import java.nio.file.Path;
 
 public class SessionBufferPoolTest {
 
-    public void testAutocommitStatementIsDurableOnDiskImmediately() throws IOException {
-        Path tmp = Files.createTempFile("stratadb-session-bufferpool-test", ".db");
-        Files.deleteIfExists(tmp);
-        try (DiskManager dm = new DiskManager(tmp)) {
-            Session session = Session.bootstrap(dm);
+    /**
+     * Durability under NO-FORCE: COMMIT returns once the log record is durable; the data file
+     * may not have the change yet. "Crash" (close every handle without flushing) and reopen
+     * through recovery: the committed row must be there.
+     */
+    public void testAutocommitStatementIsDurableWithoutAnyFlush() throws IOException {
+        assertSurvivesCrash(session -> {
             session.execute("CREATE TABLE users (id INTEGER);");
             session.execute("INSERT INTO users VALUES (1);");
-
-            // read directly against the real DiskManager, bypassing Session/BufferPool entirely —
-            // if FORCE-at-commit is working, the data must already be there, with no explicit flush call.
-            Catalog directView = Catalog.open(dm);
-            assertEquals(1, directView.openTable("users").scanAll().size(),
-                "an autocommit statement must be durable on disk the instant it returns, even through the buffer pool");
-        } finally {
-            Files.deleteIfExists(tmp);
-        }
+        }, 1);
     }
 
-    public void testExplicitTransactionCommitIsDurableOnDiskImmediately() throws IOException {
-        Path tmp = Files.createTempFile("stratadb-session-bufferpool-test", ".db");
-        Files.deleteIfExists(tmp);
-        try (DiskManager dm = new DiskManager(tmp)) {
-            Session session = Session.bootstrap(dm);
+    public void testExplicitTransactionCommitIsDurableWithoutAnyFlush() throws IOException {
+        assertSurvivesCrash(session -> {
             session.execute("CREATE TABLE users (id INTEGER);");
-
             session.execute("BEGIN;");
             session.execute("INSERT INTO users VALUES (1);");
             session.execute("INSERT INTO users VALUES (2);");
             session.execute("COMMIT;");
+        }, 2);
+    }
 
-            Catalog directView = Catalog.open(dm);
-            assertEquals(2, directView.openTable("users").scanAll().size(),
-                "COMMIT must flush every buffered dirty page before returning");
+    public void testCommitDoesNotForceDataPagesToDisk() throws IOException {
+        Path tmp = Files.createTempFile("stratadb-session-bufferpool-test", ".db");
+        Files.deleteIfExists(tmp);
+        try (DiskManager dm = new DiskManager(tmp)) {
+            WriteAheadLog wal = Session.prepareWal(dm);
+            Session session = Session.bootstrap(dm, new BufferPool(dm, 64), new LockManager(), wal);
+            session.execute("CREATE TABLE users (id INTEGER);");
+            long writesBefore = dm.pageWriteCount();
+            session.execute("INSERT INTO users VALUES (1);");
+            assertEquals(writesBefore, dm.pageWriteCount(), "NO-FORCE: a commit writes only the log, not data pages");
+            wal.close();
         } finally {
             Files.deleteIfExists(tmp);
+            Files.deleteIfExists(Path.of(tmp + ".wal"));
+        }
+    }
+
+    @FunctionalInterface
+    private interface Workload {
+        void run(Session session) throws IOException;
+    }
+
+    private static void assertSurvivesCrash(Workload workload, int expectedRows) throws IOException {
+        Path tmp = Files.createTempFile("stratadb-session-bufferpool-test", ".db");
+        Files.deleteIfExists(tmp);
+        try {
+            DiskManager dm = new DiskManager(tmp);
+            WriteAheadLog wal = Session.prepareWal(dm);
+            Session session = Session.bootstrap(dm, new BufferPool(dm, 64), new LockManager(), wal);
+            workload.run(session);
+            dm.close();  // crash: the buffer pool's dirty pages are simply lost
+            wal.close();
+
+            try (DiskManager dm2 = new DiskManager(tmp);
+                 Session reopened = Session.open(dm2)) { // runs recovery
+                ExecutionResult.Rows rows = (ExecutionResult.Rows) reopened.execute("SELECT * FROM users;");
+                assertEquals(expectedRows, rows.rows().size(), "committed rows must be recovered from the log");
+            }
+        } finally {
+            Files.deleteIfExists(tmp);
+            Files.deleteIfExists(Path.of(tmp + ".wal"));
         }
     }
 
@@ -79,18 +107,23 @@ public class SessionBufferPoolTest {
         Path tmp = Files.createTempFile("stratadb-session-bufferpool-test", ".db");
         Files.deleteIfExists(tmp);
         try (DiskManager dm = new DiskManager(tmp)) {
-            Session session = Session.bootstrap(dm);
+            BufferPool bufferPool = new BufferPool(dm, 64);
+            WriteAheadLog wal = Session.prepareWal(dm);
+            Session session = Session.bootstrap(dm, bufferPool, new LockManager(), wal);
             session.execute("CREATE TABLE users (id INTEGER);");
 
             session.execute("BEGIN;");
             session.execute("INSERT INTO users VALUES (1);");
             session.execute("ROLLBACK;");
+            bufferPool.flushAll(); // write out everything the buffer pool holds
 
             Catalog directView = Catalog.open(dm);
             assertTrue(directView.openTable("users").scanAll().isEmpty(),
                 "a rolled-back transaction's writes must never reach the buffer pool, let alone disk");
+            wal.close();
         } finally {
             Files.deleteIfExists(tmp);
+            Files.deleteIfExists(Path.of(tmp + ".wal"));
         }
     }
 

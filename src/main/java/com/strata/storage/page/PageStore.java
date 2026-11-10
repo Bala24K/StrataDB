@@ -48,4 +48,13 @@ public interface PageStore {
 
     /** Total number of pages currently in the store. */
     int getNumPages();
+
+    /**
+     * Makes every write so far durable. A no-op for stores with nothing to make durable
+     * (in-memory overlays); {@code DiskManager} fsyncs its file. Since the move to a no-force
+     * policy this is the only point at which the data file is fsynced: at a checkpoint, and at
+     * the end of WAL recovery.
+     */
+    default void sync() throws IOException {
+    }
 }

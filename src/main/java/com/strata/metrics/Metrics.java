@@ -22,10 +22,11 @@ public record Metrics(
     long lockAcquisitions,
     long lockWaits,
     long lockWaitNanos,
-    long lockTimeouts
+    long lockTimeouts,
+    long walCheckpoints
 ) {
 
-    public static final Metrics ZERO = new Metrics(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
+    public static final Metrics ZERO = new Metrics(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
 
     public Metrics minus(Metrics o) {
         return new Metrics(
@@ -43,7 +44,8 @@ public record Metrics(
             lockAcquisitions - o.lockAcquisitions,
             lockWaits - o.lockWaits,
             lockWaitNanos - o.lockWaitNanos,
-            lockTimeouts - o.lockTimeouts);
+            lockTimeouts - o.lockTimeouts,
+            walCheckpoints - o.walCheckpoints);
     }
 
     /** Buffer pool hit ratio in [0, 1], or NaN if there were no lookups. */

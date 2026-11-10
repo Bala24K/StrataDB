@@ -20,9 +20,10 @@ public class MetricsTest {
             Metrics d = db.metrics().minus(before);
 
             assertEquals(1L, d.walCommits(), "one autocommit statement = one WAL commit record");
-            assertEquals(1L, d.walFsyncs());
+            assertEquals(1L, d.walFsyncs(), "a lone committer is its own group: exactly one log fsync");
             assertTrue(d.walBytes() > 4096, "full page images are logged");
-            assertTrue(d.diskFsyncs() >= 1, "FORCE: the commit flushes dirty pages, each with an fsync");
+            assertEquals(0L, d.diskFsyncs(), "NO-FORCE: commit never fsyncs the data file");
+            assertEquals(0L, d.diskPageWrites(), "NO-FORCE: dirty pages stay in the buffer pool");
             assertEquals(2L, d.lockAcquisitions(), "catalog lock + table lock");
             assertEquals(0L, d.lockWaits());
             assertTrue(d.bufferHits() + d.bufferMisses() > 0);

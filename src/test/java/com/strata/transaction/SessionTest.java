@@ -28,20 +28,25 @@ public class SessionTest {
         Files.deleteIfExists(tmp);
         try {
             try (DiskManager dm = new DiskManager(tmp)) {
-                Session session = Session.bootstrap(dm);
+                com.strata.buffer.BufferPool pool = new com.strata.buffer.BufferPool(dm, 64);
+                com.strata.recovery.WriteAheadLog wal = Session.prepareWal(dm);
+                Session session = Session.bootstrap(dm, pool, new com.strata.lock.LockManager(), wal);
                 session.execute("CREATE TABLE users (id INTEGER);");
 
                 session.execute("BEGIN;");
                 session.execute("INSERT INTO users VALUES (1);");
                 session.execute("INSERT INTO users VALUES (2);");
 
-                // a second, independent transaction against the SAME underlying store must not see the uncommitted rows
-                Transaction outsideTxn = new Transaction(dm);
+                // a second, independent transaction over the SAME shared store (the buffer pool,
+                // which holds the latest committed state) must not see the uncommitted rows
+                Transaction outsideTxn = new Transaction(pool);
                 Catalog outsideView = Catalog.open(outsideTxn);
                 List<byte[]> rows = outsideView.openTable("users").scanAll();
                 assertTrue(rows.isEmpty(), "uncommitted rows must not be visible to a separate transaction");
 
                 session.execute("COMMIT;");
+                wal.checkpoint(() -> { pool.flushAll(); dm.sync(); }); // make the data file current
+                wal.close();
             }
 
             try (DiskManager dm2 = new DiskManager(tmp)) {
@@ -50,6 +55,7 @@ public class SessionTest {
             }
         } finally {
             Files.deleteIfExists(tmp);
+            Files.deleteIfExists(Path.of(tmp + ".wal"));
         }
     }
 

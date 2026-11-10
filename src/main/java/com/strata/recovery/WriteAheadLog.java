@@ -5,9 +5,7 @@ import com.strata.storage.page.PageStore;
 import com.strata.storage.page.PageStores;
 
 import java.io.ByteArrayInputStream;
-import java.io.ByteArrayOutputStream;
 import java.io.DataInputStream;
-import java.io.DataOutputStream;
 import java.io.IOException;
 import java.io.RandomAccessFile;
 import java.nio.ByteBuffer;
@@ -16,68 +14,111 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.locks.Condition;
+import java.util.concurrent.locks.ReentrantLock;
+import java.util.concurrent.locks.ReentrantReadWriteLock;
 import java.util.zip.CRC32;
+import java.util.zip.CRC32C;
 
 /**
- * A <b>write-ahead log</b>: before any transaction's changes are allowed to reach the real
- * database file, a durable record of exactly what that transaction wrote is appended — and
- * fsynced — to this separate log file first. If the process crashes after a transaction commits
- * but before all of its pages have actually been written through the buffer pool to disk (the
- * honest gap both Phase 7 and Phase 9 flagged), {@link #recover} replays this log on the next
- * {@code open()} and finishes the job.
+ * The <b>write-ahead log</b>: a committed transaction's page images are appended here and made
+ * durable before the transaction is acknowledged; the database file itself is written lazily.
  *
- * <h2>Why this is enough: redo-only recovery</h2>
- * A full ARIES-style recovery scheme needs both <b>redo</b> (finish applying committed changes
- * that didn't fully make it to disk) and <b>undo</b> (roll back changes from a transaction that
- * was still in progress, if a "steal" policy let some of its dirty pages reach disk early).
- * StrataDB only needs the first half. Phase 9 established a <b>NO-STEAL</b> buffer pool policy:
- * an in-progress transaction's writes live entirely in {@code Transaction}'s own private
- * overlay and are never visible to the buffer pool — let alone disk — until that transaction's
- * own {@code commit()}. That means nothing uncommitted can ever reach the real file in the
- * first place, so there is never anything to undo. Every record this log ever writes represents
- * an already-committed transaction, which is why this format doesn't need a separate "commit
- * marker" distinguishing committed from in-progress work — a record existing in the log at all
- * *means* committed.
+ * <h2>Policy: NO-STEAL / NO-FORCE, redo-only</h2>
+ * <ul>
+ *   <li><b>No-steal:</b> uncommitted changes live only in {@code Transaction}'s private overlay,
+ *       never in the buffer pool, so nothing uncommitted can reach the data file. Recovery
+ *       therefore never needs <em>undo</em>.</li>
+ *   <li><b>No-force:</b> commit makes only the <em>log</em> durable (one fsync, shared with
+ *       concurrent committers, below). Dirty pages reach the data file when the buffer pool
+ *       evicts them or at a {@link #checkpoint}. This is safe because a page only enters the
+ *       buffer pool after its commit record is durable: the WAL rule ("log before data") holds
+ *       by construction. Before this change, every commit also fsynced each dirty data page
+ *       (FORCE), roughly doubling the fsyncs per commit.</li>
+ *   <li><b>Redo-only, idempotent:</b> records hold full page images, so replaying a record any
+ *       number of times gives the same result, and a data page torn by a crash mid-write is
+ *       repaired by replay: every page written since the last checkpoint has its latest full
+ *       image in the log.</li>
+ * </ul>
  *
- * <h2>Record format</h2>
- * Sequential, length-prefixed, checksummed records, appended one after another:
+ * <h2>Group commit</h2>
+ * Appending a record and fsyncing the file are separate steps. A committer appends its record,
+ * then waits until the file is durable up to the end of that record. If no fsync is in
+ * progress it becomes the <em>leader</em> and fsyncs everything appended so far; committers
+ * that append while that fsync runs are covered by the next one. Under concurrency one fsync
+ * thus acknowledges many commits ({@code commitCount() / fsyncCount()} is the average group size).
+ *
+ * <p><b>Why applying after the fsync is still safe.</b> A transaction applies its pages to the
+ * buffer pool only after its record is durable, so two transactions could apply in a
+ * different order than they were logged. That would matter only if both wrote the same page.
+ * Under strict two-phase locking they can't commit concurrently: writers of a page conflict on
+ * its table's (or the catalog's) exclusive lock, which the first holds until after it has applied.
+ * {@link #commit} still checks this at runtime (per-page last applied sequence number) and
+ * fails stop if it is ever violated, rather than silently letting memory diverge from the log.
+ *
+ * <h2>Checkpoints</h2>
+ * {@link #checkpoint} blocks new commits, waits for in-flight ones, runs the caller's
+ * "flush every dirty page and fsync the data file" action, then truncates the log to empty.
+ * This is a simple blocking (sharp) checkpoint: the stall is bounded by the buffer pool size.
+ * Crash before the truncation: the full log replays (idempotent). After it: the data file is
+ * already durable. A checkpoint is the only time the data file is fsynced.
+ *
+ * <h2>Record format (v2)</h2>
  * <pre>
- *   recordLength : int    (byte length of the payload that follows)
- *   payload      : txnSeq (long), numPages (int), then for each page: pageId (int) + PAGE_SIZE bytes
- *   checksum     : long   (CRC32 of the payload, for detecting a torn or corrupted record)
+ *   magic    : int  0x53574C32 ("SWL2")
+ *   length   : int  payload length
+ *   payload  : txnSeq (long), durableHorizon (long), numPages (int), numPages x [pageId (int), PAGE_SIZE bytes]
+ *   checksum : long CRC32C of the payload
  * </pre>
- * The length prefix and checksum together are what let {@link #recover} safely stop at a record
- * that was only partially written when the process died mid-append, instead of misreading
- * garbage as valid data.
- *
- * <h2>A known limitation: no checkpointing</h2>
- * The log is only ever cleared at {@link #recover}, i.e. the next time the database is opened —
- * not during normal operation. A very long-running session logs every single committed
- * transaction (including every autocommit statement) for its entire lifetime, so the log file
- * grows without bound. A production system periodically <b>checkpoints</b>: flush every dirty
- * page, then safely truncate the log up to that point. Real, valuable future work — not
- * required for this log to be correct, just for it to stay small.
+ * {@code durableHorizon} is how far the log was known durable when the record was appended.
+ * It lets recovery tell a torn tail from corruption even though group commit means several
+ * records can be in flight (and torn, in any order) at once; see {@link #recover}. Logs written
+ * before this format (v1: length, txnSeq, numPages, pages, CRC32; no magic) are still recovered:
+ * a v1 length can never equal the magic number.
  */
 public final class WriteAheadLog implements AutoCloseable {
 
-    /** Smallest valid payload: txnSeq (8) + numPages (4). */
-    private static final int MIN_PAYLOAD = Long.BYTES + Integer.BYTES;
+    static final int MAGIC = 0x53574C32;
+    private static final int V2_HEADER = Integer.BYTES * 2;
+    private static final int V2_MIN_PAYLOAD = Long.BYTES * 2 + Integer.BYTES;
+    private static final int V1_MIN_PAYLOAD = Long.BYTES + Integer.BYTES;
+    private static final int PAGE_ENTRY = Integer.BYTES + Page.PAGE_SIZE;
 
     private final RandomAccessFile file;
     private final FileChannel channel;
+
+    /** Guards the append position, the durable position and the leader election below. */
+    private final ReentrantLock lock = new ReentrantLock();
+    private final Condition durableAdvanced = lock.newCondition();
+    private long appendPosition;
+    private long durablePosition;
+    private boolean syncInProgress;
     private long nextTxnSeq = 1;
+
+    /** Commits hold the read side; a checkpoint takes the write side. Fair, so a checkpoint isn't starved. */
+    private final ReentrantReadWriteLock checkpointLock = new ReentrantReadWriteLock(true);
+
+    /** pageId -> sequence number of the last commit applied to it since the last checkpoint. */
+    private final Map<Integer, Long> lastAppliedSeq = new ConcurrentHashMap<>();
 
     /** Set once a commit has failed in a way that leaves memory and the log out of step; see {@link #commit}. */
     private volatile Throwable failure;
 
-    // Instrumentation, written under this object's monitor.
+    private volatile long autoCheckpointBytes = Long.MAX_VALUE;
+    private volatile FlushAction autoCheckpointFlush;
+
+    // Instrumentation.
     private volatile long commitsLogged;
     private volatile long bytesLogged;
     private volatile long fsyncs;
+    private volatile long checkpoints;
 
-    private WriteAheadLog(RandomAccessFile file, FileChannel channel) {
+    private WriteAheadLog(RandomAccessFile file, FileChannel channel) throws IOException {
         this.file = file;
         this.channel = channel;
+        this.appendPosition = channel.size();
+        this.durablePosition = appendPosition;
     }
 
     /** Opens (creating if necessary) the log file at {@code path}, ready to append further records. */
@@ -86,67 +127,186 @@ public final class WriteAheadLog implements AutoCloseable {
         return new WriteAheadLog(file, file.getChannel());
     }
 
-    /**
-     * Durably logs {@code pageWrites} as one committed transaction record — appended and
-     * fsynced before this method returns. Callers must call this <em>before</em> applying any
-     * of the same writes to the real store; that ordering is the entire meaning of
-     * "write-ahead". Prefer {@link #commit}, which also applies the writes in log order.
-     *
-     * <p>If the append itself fails, the partial bytes are truncated away (so a later append
-     * can't land behind a torn record that recovery would stop at) and the log refuses all
-     * further commits — see {@link #commit}.
-     */
-    public synchronized long logCommit(Map<Integer, Page> pageWrites) throws IOException {
-        requireHealthy();
-        long txnSeq = nextTxnSeq++;
-        byte[] frame = frame(encodePayload(txnSeq, pageWrites));
+    // ---- commit path ----
 
-        long start = channel.size();
-        try {
-            long position = start;
-            ByteBuffer buffer = ByteBuffer.wrap(frame);
-            while (buffer.hasRemaining()) {
-                position += channel.write(buffer, position);
-            }
-            channel.force(true); // the actual write-ahead guarantee: durable before anything is applied
-            fsyncs++;
-            commitsLogged++;
-            bytesLogged += frame.length;
-        } catch (IOException | RuntimeException e) {
-            failure = e;
-            try {
-                channel.truncate(start);
-                channel.force(true);
-            } catch (IOException suppressed) {
-                e.addSuppressed(suppressed);
-            }
-            throw e;
-        }
-        return txnSeq;
+    /**
+     * Durably logs {@code pageWrites} as one committed transaction record and returns its
+     * sequence number once it is durable. Does not apply anything; prefer {@link #commit}.
+     */
+    public long logCommit(Map<Integer, Page> pageWrites) throws IOException {
+        long[] appended = append(pageWrites);
+        awaitDurable(appended[1]);
+        return appended[0];
     }
 
     /**
-     * Commits one transaction: logs {@code pageWrites} durably, then applies them to
-     * {@code target}, as a single critical section. Holding one lock across both steps means
-     * the order records appear in the log is exactly the order they were applied in memory, so
-     * replaying the log reproduces the live state even if two transactions touched the same
-     * page. (Separate critical sections allowed log order A,B but apply order B,A.)
+     * Commits one transaction: appends its record, waits until the record is durable (group
+     * commit), then applies the pages to {@code target} (the buffer pool).
      *
      * <p><b>Fail-stop.</b> If applying fails after the record is durable, the commit has
      * happened as far as the log is concerned (recovery will redo it), but memory now holds a
-     * half-applied transaction. Rather than let other transactions build on that, this log
+     * half-applied transaction. Rather than let other transactions build on that, the log then
      * refuses every further commit with {@link IllegalStateException} until the database is
      * reopened, at which point recovery finishes the job from the log.
      */
-    public synchronized void commit(Map<Integer, Page> pageWrites, PageStore target) throws IOException {
-        logCommit(pageWrites);
+    public void commit(Map<Integer, Page> pageWrites, PageStore target) throws IOException {
+        checkpointLock.readLock().lock();
         try {
-            PageStores.applyAll(target, pageWrites);
-        } catch (IOException | RuntimeException e) {
-            failure = e;
-            throw new IOException("Commit was logged durably but could not be applied in memory; "
-                + "it will be completed by recovery when the database is reopened. "
-                + "No further commits are accepted until then.", e);
+            long[] appended = append(pageWrites);
+            long seq = appended[0];
+            awaitDurable(appended[1]);
+            try {
+                for (Integer pageId : pageWrites.keySet()) {
+                    Long previous = lastAppliedSeq.put(pageId, seq);
+                    if (previous != null && previous > seq) {
+                        throw new IllegalStateException("Page " + pageId + " was applied by commit " + previous
+                            + " before commit " + seq + " that precedes it in the log: two transactions wrote the "
+                            + "same page concurrently, which the lock protocol must prevent");
+                    }
+                }
+                PageStores.applyAll(target, pageWrites);
+            } catch (IOException | RuntimeException e) {
+                failure = e;
+                throw new IOException("Commit was logged durably but could not be applied in memory; "
+                    + "it will be completed by recovery when the database is reopened. "
+                    + "No further commits are accepted until then.", e);
+            }
+        } finally {
+            checkpointLock.readLock().unlock();
+        }
+        FlushAction flush = autoCheckpointFlush;
+        if (flush != null && size() > autoCheckpointBytes) {
+            checkpoint(flush, autoCheckpointBytes);
+        }
+    }
+
+    /**
+     * After any commit that leaves the log larger than {@code thresholdBytes}, the committing
+     * thread runs a checkpoint with {@code flush}. Bounds both the log's size and recovery time.
+     */
+    public void configureAutoCheckpoint(long thresholdBytes, FlushAction flush) {
+        this.autoCheckpointBytes = thresholdBytes;
+        this.autoCheckpointFlush = flush;
+    }
+
+    /** Appends one record (not yet durable). Returns {txnSeq, endPosition}. */
+    private long[] append(Map<Integer, Page> pageWrites) throws IOException {
+        lock.lock();
+        try {
+            requireHealthy();
+            long seq = nextTxnSeq++;
+            ByteBuffer frame = encode(seq, durablePosition, pageWrites);
+            long start = appendPosition;
+            try {
+                long position = start;
+                while (frame.hasRemaining()) {
+                    position += channel.write(frame, position);
+                }
+                appendPosition = position;
+            } catch (IOException | RuntimeException e) {
+                // Remove the partial record so nothing can ever be appended behind it, then
+                // refuse further commits.
+                failure = e;
+                try {
+                    channel.truncate(start);
+                } catch (IOException suppressed) {
+                    e.addSuppressed(suppressed);
+                }
+                durableAdvanced.signalAll();
+                throw e;
+            }
+            commitsLogged++;
+            bytesLogged += appendPosition - start;
+            return new long[] {seq, appendPosition};
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    /** Blocks until the log is durable up to {@code end}, fsyncing as the group leader if nobody else is. */
+    private void awaitDurable(long end) throws IOException {
+        lock.lock();
+        try {
+            while (durablePosition < end) {
+                requireHealthy();
+                if (syncInProgress) {
+                    durableAdvanced.awaitUninterruptibly();
+                    continue;
+                }
+                syncInProgress = true;
+                long upTo = appendPosition; // everything appended so far is covered by this fsync
+                lock.unlock();
+                IOException error = null;
+                try {
+                    channel.force(true);
+                } catch (IOException e) {
+                    error = e;
+                }
+                lock.lock();
+                syncInProgress = false;
+                if (error != null) {
+                    failure = error;
+                    durableAdvanced.signalAll();
+                    throw error;
+                }
+                fsyncs++;
+                durablePosition = Math.max(durablePosition, upTo);
+                durableAdvanced.signalAll();
+            }
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    // ---- checkpoint ----
+
+    /** The caller's part of a checkpoint: write every dirty page to the data file and fsync it. */
+    @FunctionalInterface
+    public interface FlushAction {
+        void flushAndSync() throws IOException;
+    }
+
+    /**
+     * Blocks new commits, waits for in-flight ones to finish applying, runs {@code flush}
+     * (which must leave every committed change durable in the data file), then truncates the
+     * log. See the class docs.
+     */
+    public void checkpoint(FlushAction flush) throws IOException {
+        checkpoint(flush, -1);
+    }
+
+    /** Checkpoints only if the log is still larger than {@code minBytes} once commits are blocked. */
+    private void checkpoint(FlushAction flush, long minBytes) throws IOException {
+        checkpointLock.writeLock().lock();
+        try {
+            if (size() <= minBytes) {
+                return; // another thread checkpointed first
+            }
+            requireHealthy();
+            flush.flushAndSync();
+            lock.lock();
+            try {
+                channel.truncate(0);
+                channel.force(true);
+                appendPosition = 0;
+                durablePosition = 0;
+                lastAppliedSeq.clear();
+                checkpoints++;
+            } finally {
+                lock.unlock();
+            }
+        } finally {
+            checkpointLock.writeLock().unlock();
+        }
+    }
+
+    /** Bytes currently in the log (since the last checkpoint). */
+    public long size() {
+        lock.lock();
+        try {
+            return appendPosition;
+        } finally {
+            lock.unlock();
         }
     }
 
@@ -160,6 +320,10 @@ public final class WriteAheadLog implements AutoCloseable {
 
     public long fsyncCount() {
         return fsyncs;
+    }
+
+    public long checkpointCount() {
+        return checkpoints;
     }
 
     /** True until a commit fails in a way that requires a restart; see {@link #commit}. */
@@ -183,51 +347,46 @@ public final class WriteAheadLog implements AutoCloseable {
 
     // ---- encoding ----
 
-    private static byte[] encodePayload(long txnSeq, Map<Integer, Page> pageWrites) throws IOException {
-        ByteArrayOutputStream bytes = new ByteArrayOutputStream();
-        try (DataOutputStream out = new DataOutputStream(bytes)) {
-            out.writeLong(txnSeq);
-            out.writeInt(pageWrites.size());
-            for (Map.Entry<Integer, Page> entry : pageWrites.entrySet()) {
-                out.writeInt(entry.getKey());
-                out.write(entry.getValue().getData());
-            }
+    private static ByteBuffer encode(long seq, long durableHorizon, Map<Integer, Page> pageWrites) {
+        int payloadLength = V2_MIN_PAYLOAD + pageWrites.size() * PAGE_ENTRY;
+        ByteBuffer frame = ByteBuffer.allocate(V2_HEADER + payloadLength + Long.BYTES);
+        frame.putInt(MAGIC).putInt(payloadLength);
+        int payloadStart = frame.position();
+        frame.putLong(seq).putLong(durableHorizon).putInt(pageWrites.size());
+        for (Map.Entry<Integer, Page> entry : pageWrites.entrySet()) {
+            frame.putInt(entry.getKey()).put(entry.getValue().getData());
         }
-        return bytes.toByteArray();
-    }
-
-    private static byte[] frame(byte[] payload) throws IOException {
-        ByteArrayOutputStream bytes = new ByteArrayOutputStream(payload.length + Integer.BYTES + Long.BYTES);
-        try (DataOutputStream out = new DataOutputStream(bytes)) {
-            out.writeInt(payload.length);
-            out.write(payload);
-            out.writeLong(checksum(payload));
-        }
-        return bytes.toByteArray();
-    }
-
-    private static long checksum(byte[] payload) {
-        CRC32 crc = new CRC32();
-        crc.update(payload);
-        return crc.getValue();
+        CRC32C crc = new CRC32C();
+        crc.update(frame.array(), payloadStart, payloadLength);
+        frame.putLong(crc.getValue());
+        return frame.flip();
     }
 
     // ---- recovery ----
 
+    /** One parsed, checksum-valid record. */
+    private record Record(int version, byte[] payload, long next) {
+        long durableHorizon() {
+            return version == 2 ? ByteBuffer.wrap(payload).getLong(Long.BYTES) : -1;
+        }
+    }
+
     /**
-     * Replays every complete, valid record in the log at {@code path} into {@code target}, then
-     * deletes the log — its contents are now durably reflected in {@code target}, so there's
-     * nothing left worth keeping. A no-op if the file doesn't exist or is empty (a clean prior
-     * shutdown already cleared it). Must run before anything else touches {@code target}.
+     * Replays every valid record in the log at {@code path} into {@code target}, makes
+     * {@code target} durable ({@link PageStore#sync}), then deletes the log. A no-op if the file
+     * doesn't exist or is empty (a clean shutdown checkpoints the log to empty). Must run before
+     * anything else touches {@code target}.
      *
      * <h3>Torn tail vs. corruption</h3>
-     * Records are appended one at a time and each is fsynced before the next begins, so a crash
-     * can only ever damage the <em>last</em> record. Anything wrong with the final record (short,
-     * implausible length, bad checksum) is therefore a torn append and is safely ignored: that
-     * transaction was never acknowledged. A bad record <em>followed by more data</em> can't be
-     * explained by a crash; it means the file is corrupt, and silently skipping it would drop
-     * acknowledged commits after it. Recovery throws {@link IOException} instead, leaving the log
-     * in place for inspection.
+     * Only records that were never acknowledged can be damaged by a crash: those appended after
+     * the last completed fsync. With group commit there can be several, torn in any order. So
+     * when a record at offset X is unreadable (short, implausible length, bad checksum),
+     * recovery looks for any later valid v2 record whose {@code durableHorizon} is beyond X. If
+     * one exists, X had already been made durable — and acknowledged — before that record was
+     * written, so this is corruption: recovery throws {@link IOException} and keeps the log for
+     * inspection rather than silently dropping acknowledged commits. Otherwise X and everything
+     * after it is an unacknowledged torn tail and is ignored. (A corrupted record with nothing
+     * durable after it is indistinguishable from a torn tail; that's inherent to the format.)
      */
     public static void recover(Path path, PageStore target) throws IOException {
         if (!Files.exists(path) || Files.size(path) == 0) {
@@ -237,48 +396,100 @@ public final class WriteAheadLog implements AutoCloseable {
              FileChannel channel = file.getChannel()) {
             long size = channel.size();
             long position = 0;
-
             while (position < size) {
-                long recordStart = position;
-                ByteBuffer lengthBuf = ByteBuffer.allocate(Integer.BYTES);
-                if (readFully(channel, lengthBuf, position) < Integer.BYTES) {
-                    break; // torn length prefix at the very end of the log — stop, ignore it
+                Record record = tryParse(channel, position, size);
+                if (record == null) {
+                    checkTornTail(path, channel, position, size);
+                    break;
                 }
-                position += Integer.BYTES;
-                int payloadLength = lengthBuf.getInt(0);
-
-                if (payloadLength < MIN_PAYLOAD || (payloadLength - MIN_PAYLOAD) % (Integer.BYTES + Page.PAGE_SIZE) != 0) {
-                    // Not a length any real record could have. At the tail, that's a torn length
-                    // prefix; anywhere else, corruption.
-                    if (position + Math.max(payloadLength, 0) + Long.BYTES >= size || restIsZeros(channel, recordStart, size)) {
-                        break;
-                    }
-                    throw corrupt(path, recordStart, "implausible record length " + payloadLength);
-                }
-                if (position + payloadLength + Long.BYTES > size) {
-                    break; // torn payload or checksum — the process died mid-append of this record
-                }
-
-                ByteBuffer payloadBuf = ByteBuffer.allocate(payloadLength);
-                readFully(channel, payloadBuf, position);
-                position += payloadLength;
-
-                ByteBuffer checksumBuf = ByteBuffer.allocate(Long.BYTES);
-                readFully(channel, checksumBuf, position);
-                position += Long.BYTES;
-
-                byte[] payload = payloadBuf.array();
-                if (checksum(payload) != checksumBuf.getLong(0)) {
-                    if (position == size || restIsZeros(channel, position, size)) {
-                        break; // the final record was torn mid-write: never acknowledged, ignore it
-                    }
-                    throw corrupt(path, recordStart, "checksum mismatch with " + (size - position) + " bytes of log after it");
-                }
-
-                applyPayload(payload, target, path, recordStart);
+                applyPayload(record, target, path, position);
+                position = record.next();
             }
         }
+        target.sync(); // replayed pages must be durable before the log that describes them is deleted
         Files.deleteIfExists(path);
+    }
+
+    /** Throws if the unreadable record at {@code badAt} can't be explained as a torn tail. */
+    private static void checkTornTail(Path path, FileChannel channel, long badAt, long size) throws IOException {
+        if (restIsZeros(channel, badAt, size)) {
+            return; // the file grew but the data never arrived: a torn append
+        }
+        boolean v1 = readInt(channel, badAt, size) != MAGIC && !hasMagicAnywhere(channel, badAt, size);
+        if (v1) {
+            // Legacy (v1) logs were written one fsynced record at a time, so only the last record can be torn.
+            long len = readInt(channel, badAt, size);
+            if (badAt + Integer.BYTES + Math.max(len, 0) + Long.BYTES >= size) {
+                return;
+            }
+            throw corrupt(path, badAt, "unreadable record followed by more log");
+        }
+        // Resynchronise: find later valid v2 records by their magic number and check their horizons.
+        for (long p = badAt + 1; p + V2_HEADER <= size; p++) {
+            if (readInt(channel, p, size) != MAGIC) continue;
+            Record later = tryParse(channel, p, size);
+            if (later != null && later.durableHorizon() > badAt) {
+                throw corrupt(path, badAt, "unreadable record, but a later record at byte " + p
+                    + " shows the log was already durable past it");
+            }
+        }
+    }
+
+    private static boolean hasMagicAnywhere(FileChannel channel, long from, long size) throws IOException {
+        for (long p = from; p + Integer.BYTES <= size; p++) {
+            if (readInt(channel, p, size) == MAGIC) return true;
+        }
+        return false;
+    }
+
+    /** Parses and checksums the record at {@code p}, or returns null if it's incomplete or invalid. */
+    private static Record tryParse(FileChannel channel, long p, long size) throws IOException {
+        if (p + Integer.BYTES > size) return null;
+        int first = readInt(channel, p, size);
+        if (first == MAGIC) {
+            if (p + V2_HEADER > size) return null;
+            int len = readInt(channel, p + Integer.BYTES, size);
+            if (len < V2_MIN_PAYLOAD || (len - V2_MIN_PAYLOAD) % PAGE_ENTRY != 0) return null;
+            long checksumAt = p + V2_HEADER + len;
+            if (checksumAt + Long.BYTES > size) return null;
+            byte[] payload = readBytes(channel, p + V2_HEADER, len);
+            CRC32C crc = new CRC32C();
+            crc.update(payload);
+            if (crc.getValue() != readLong(channel, checksumAt)) return null;
+            return new Record(2, payload, checksumAt + Long.BYTES);
+        }
+        // v1: length, payload, CRC32
+        int len = first;
+        if (len < V1_MIN_PAYLOAD || (len - V1_MIN_PAYLOAD) % PAGE_ENTRY != 0) return null;
+        long checksumAt = p + Integer.BYTES + len;
+        if (checksumAt + Long.BYTES > size) return null;
+        byte[] payload = readBytes(channel, p + Integer.BYTES, len);
+        CRC32 crc = new CRC32();
+        crc.update(payload);
+        if (crc.getValue() != readLong(channel, checksumAt)) return null;
+        return new Record(1, payload, checksumAt + Long.BYTES);
+    }
+
+    private static void applyPayload(Record record, PageStore target, Path path, long recordStart) throws IOException {
+        try (DataInputStream in = new DataInputStream(new ByteArrayInputStream(record.payload()))) {
+            in.readLong(); // txnSeq
+            if (record.version() == 2) {
+                in.readLong(); // durableHorizon
+            }
+            int numPages = in.readInt();
+            int header = record.version() == 2 ? V2_MIN_PAYLOAD : V1_MIN_PAYLOAD;
+            if (record.payload().length != header + numPages * PAGE_ENTRY) {
+                throw corrupt(path, recordStart, "page count " + numPages + " doesn't match record length " + record.payload().length);
+            }
+            Map<Integer, Page> writes = new LinkedHashMap<>();
+            for (int i = 0; i < numPages; i++) {
+                int pageId = in.readInt();
+                byte[] data = new byte[Page.PAGE_SIZE];
+                in.readFully(data);
+                writes.put(pageId, new Page(data));
+            }
+            PageStores.applyAll(target, writes);
+        }
     }
 
     /**
@@ -301,25 +512,26 @@ public final class WriteAheadLog implements AutoCloseable {
 
     private static IOException corrupt(Path path, long offset, String detail) {
         return new IOException("Write-ahead log " + path + " is corrupt at byte " + offset + " (" + detail
-            + "); refusing to recover rather than silently dropping committed transactions after it");
+            + "); refusing to recover rather than silently dropping committed transactions");
     }
 
-    private static void applyPayload(byte[] payload, PageStore target, Path path, long recordStart) throws IOException {
-        try (DataInputStream in = new DataInputStream(new ByteArrayInputStream(payload))) {
-            in.readLong(); // txnSeq — not needed by recovery itself; kept for future diagnostics
-            int numPages = in.readInt();
-            if (payload.length != MIN_PAYLOAD + numPages * (Integer.BYTES + Page.PAGE_SIZE)) {
-                throw corrupt(path, recordStart, "page count " + numPages + " doesn't match record length " + payload.length);
-            }
-            Map<Integer, Page> writes = new LinkedHashMap<>();
-            for (int i = 0; i < numPages; i++) {
-                int pageId = in.readInt();
-                byte[] data = new byte[Page.PAGE_SIZE];
-                in.readFully(data);
-                writes.put(pageId, new Page(data));
-            }
-            PageStores.applyAll(target, writes);
-        }
+    private static int readInt(FileChannel channel, long p, long size) throws IOException {
+        if (p + Integer.BYTES > size) return 0;
+        ByteBuffer b = ByteBuffer.allocate(Integer.BYTES);
+        readFully(channel, b, p);
+        return b.getInt(0);
+    }
+
+    private static long readLong(FileChannel channel, long p) throws IOException {
+        ByteBuffer b = ByteBuffer.allocate(Long.BYTES);
+        readFully(channel, b, p);
+        return b.getLong(0);
+    }
+
+    private static byte[] readBytes(FileChannel channel, long p, int length) throws IOException {
+        ByteBuffer b = ByteBuffer.allocate(length);
+        readFully(channel, b, p);
+        return b.array();
     }
 
     private static int readFully(FileChannel channel, ByteBuffer buffer, long position) throws IOException {

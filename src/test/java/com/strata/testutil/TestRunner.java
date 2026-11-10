@@ -49,7 +49,8 @@ public final class TestRunner {
         com.strata.recovery.RecoveryHardeningTest.class,
         com.strata.recovery.CrashInjectionTest.class,
         com.strata.recovery.ProcessKillTest.class,
-        com.strata.engine.MetricsTest.class
+        com.strata.engine.MetricsTest.class,
+        com.strata.recovery.GroupCommitCheckpointTest.class
     );
 
     public static void main(String[] args) throws Exception {

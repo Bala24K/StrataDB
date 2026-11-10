@@ -34,13 +34,14 @@ import java.util.concurrent.atomic.AtomicLong;
  * later (a record id, an index entry, a free-list link) ultimately resolves to a
  * page id, which resolves to a byte offset via this formula.
  *
- * <h2>Durability note (preview of the Recovery phase)</h2>
- * A successful {@code write()} only guarantees the OS's page cache has the data —
- * not that it has reached the physical disk. {@link FileChannel#force(boolean)}
- * asks the OS to flush ("fsync") outstanding writes to stable storage. We call it
- * after every page write for now, which is correct but slow; the Buffer Pool and
- * Write-Ahead Log phases will later replace "fsync on every write" with a much
- * smarter, batched durability strategy.
+ * <h2>Durability</h2>
+ * A successful {@code write()} only guarantees the OS's page cache has the data, not that it
+ * has reached the physical disk; {@link #sync()} ({@link FileChannel#force(boolean)}) does.
+ * This class used to fsync after every single page write. Durability now comes from the
+ * write-ahead log instead (see {@code WriteAheadLog}): a committed change is durable once its
+ * log record is, so data pages are written without fsync and the file is synced only at a
+ * checkpoint and at the end of recovery. A crash can therefore leave recent page writes
+ * missing or torn; recovery rewrites every page changed since the last checkpoint from the log.
  */
 public final class DiskManager implements PageStore, AutoCloseable {
 
@@ -65,10 +66,15 @@ public final class DiskManager implements PageStore, AutoCloseable {
         this.file = new RandomAccessFile(dbFile.toFile(), "rw");
         this.channel = file.getChannel();
         long sizeInBytes = channel.size();
-        if (sizeInBytes % Page.PAGE_SIZE != 0) {
-            throw new IOException(
-                "Corrupt database file: size " + sizeInBytes +
-                " is not a multiple of PAGE_SIZE (" + Page.PAGE_SIZE + ")");
+        long partial = sizeInBytes % Page.PAGE_SIZE;
+        if (partial != 0) {
+            // A crash while the file was being extended (pages are no longer fsynced one by one)
+            // can leave a partially written last page. Everything written since the last
+            // checkpoint — which synced the file at a page boundary — is in the write-ahead log,
+            // which recovery replays next, growing the file again as needed. So the fragment
+            // carries no information that isn't in the log, and is dropped.
+            channel.truncate(sizeInBytes - partial);
+            sizeInBytes -= partial;
         }
         this.numPages = new AtomicInteger((int) (sizeInBytes / Page.PAGE_SIZE));
     }
@@ -89,7 +95,7 @@ public final class DiskManager implements PageStore, AutoCloseable {
         return new Page(buffer.array());
     }
 
-    /** Overwrites the page with the given id on disk, then flushes it to stable storage. */
+    /** Overwrites the page with the given id (not yet durable; see {@link #sync()}). */
     @Override
     public synchronized void writePage(int pageId, Page page) throws IOException {
         validatePageId(pageId);
@@ -97,7 +103,12 @@ public final class DiskManager implements PageStore, AutoCloseable {
         ByteBuffer buffer = ByteBuffer.wrap(page.getData());
         writeFully(buffer, offset);
         pageWrites.incrementAndGet();
-        channel.force(false); // fsync data (not necessarily file metadata) — see class javadoc
+    }
+
+    /** fsyncs the file, including its length (metadata), since allocation grows it. */
+    @Override
+    public synchronized void sync() throws IOException {
+        channel.force(true);
         fsyncs.incrementAndGet();
     }
 

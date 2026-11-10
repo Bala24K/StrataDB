@@ -106,6 +106,20 @@ public class CrashInjectionTest {
                     s.execute("ROLLBACK;");
                     continue;
                 }
+                if (step % 25 == 24) {
+                    try {
+                        // Data pages reach the file only via eviction and checkpoints, so crash
+                        // inside checkpoint flushes too. A failed checkpoint must not truncate the log.
+                        log.checkpoint(() -> {
+                            pool.flushAll();
+                            faulty.sync();
+                        });
+                    } catch (IOException | RuntimeException e) {
+                        if (!faulty.failed) throw e;
+                        s.execute("ROLLBACK;"); // the open transaction never committed
+                        break;
+                    }
+                }
                 try {
                     s.execute("COMMIT;");
                     committed = pending;
@@ -207,6 +221,12 @@ public class CrashInjectionTest {
         @Override
         public int getNumPages() {
             return disk.getNumPages();
+        }
+
+        @Override
+        public void sync() throws IOException {
+            if (failed) throw new IOException("injected crash (process already dead)");
+            disk.sync();
         }
     }
 }

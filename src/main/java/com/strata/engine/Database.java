@@ -28,23 +28,35 @@ import java.nio.file.Path;
  */
 public final class Database implements AutoCloseable {
 
-    /** Tunables. {@link #defaults()} matches the historical hard-coded values. */
-    public record Options(int bufferPoolPages, long lockTimeoutMillis) {
+    /**
+     * Tunables.
+     *
+     * @param bufferPoolPages      buffer pool capacity in 4 KiB pages
+     * @param lockTimeoutMillis    how long a lock request waits before {@code LockTimeoutException}
+     * @param checkpointWalBytes   checkpoint automatically once the log exceeds this size; bounds
+     *                             log growth and recovery time
+     */
+    public record Options(int bufferPoolPages, long lockTimeoutMillis, long checkpointWalBytes) {
         public Options {
             if (bufferPoolPages < 1) throw new IllegalArgumentException("bufferPoolPages must be >= 1");
             if (lockTimeoutMillis < 0) throw new IllegalArgumentException("lockTimeoutMillis must be >= 0");
+            if (checkpointWalBytes < 1) throw new IllegalArgumentException("checkpointWalBytes must be >= 1");
         }
 
         public static Options defaults() {
-            return new Options(64, 5_000);
+            return new Options(64, 5_000, 16L * 1024 * 1024);
         }
 
         public Options withBufferPoolPages(int pages) {
-            return new Options(pages, lockTimeoutMillis);
+            return new Options(pages, lockTimeoutMillis, checkpointWalBytes);
         }
 
         public Options withLockTimeoutMillis(long millis) {
-            return new Options(bufferPoolPages, millis);
+            return new Options(bufferPoolPages, millis, checkpointWalBytes);
+        }
+
+        public Options withCheckpointWalBytes(long bytes) {
+            return new Options(bufferPoolPages, lockTimeoutMillis, bytes);
         }
     }
 
@@ -71,21 +83,26 @@ public final class Database implements AutoCloseable {
     }
 
     public static Database open(Path file, Options options) throws IOException {
-        boolean isNew = !Files.exists(file) || Files.size(file) == 0;
         DiskManager diskManager = new DiskManager(file);
+        // Decided after DiskManager has dropped any partial trailing page: a file that holds no
+        // complete page was never successfully bootstrapped (bootstrap syncs before returning).
+        boolean isNew = diskManager.getNumPages() == 0;
         try {
             WriteAheadLog wal;
             if (isNew) {
                 Files.deleteIfExists(Session.walPathFor(diskManager)); // debris from some earlier database
                 wal = WriteAheadLog.open(Session.walPathFor(diskManager));
                 Catalog.bootstrap(diskManager);
+                diskManager.sync(); // the catalog root is written directly, not through the log
             } else {
                 wal = Session.prepareWal(diskManager); // recovery runs before anything else reads the file
             }
-            return new Database(file, diskManager,
+            Database db = new Database(file, diskManager,
                 new BufferPool(diskManager, options.bufferPoolPages()),
                 new LockManager(options.lockTimeoutMillis()),
                 wal, isNew);
+            wal.configureAutoCheckpoint(options.checkpointWalBytes(), db::flushAndSync);
+            return db;
         } catch (IOException | RuntimeException e) {
             diskManager.close();
             throw e;
@@ -140,10 +157,24 @@ public final class Database implements AutoCloseable {
             lockManager.acquisitionCount(),
             lockManager.waitCount(),
             lockManager.waitNanos(),
-            lockManager.timeoutCount());
+            lockManager.timeoutCount(),
+            wal.checkpointCount());
     }
 
-    /** Flushes cached pages and closes the file and log. Sessions must not be used afterwards. */
+    /**
+     * Writes every dirty page to the data file, fsyncs it, and empties the write-ahead log.
+     * Runs automatically when the log passes {@link Options#checkpointWalBytes()} and on close.
+     */
+    public void checkpoint() throws IOException {
+        wal.checkpoint(this::flushAndSync);
+    }
+
+    private void flushAndSync() throws IOException {
+        bufferPool.flushAll();
+        diskManager.sync();
+    }
+
+    /** Checkpoints (unless a failed commit left recovery work to do) and closes the file and log. */
     @Override
     public synchronized void close() throws IOException {
         if (closed) {
@@ -152,7 +183,7 @@ public final class Database implements AutoCloseable {
         closed = true;
         try {
             if (wal.isHealthy()) {
-                bufferPool.flushAll(); // after a failed commit, leave the file to recovery instead
+                checkpoint(); // clean shutdown: data file durable, log empty, fast next open
             }
         } finally {
             diskManager.close();

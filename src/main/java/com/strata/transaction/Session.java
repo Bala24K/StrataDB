@@ -66,8 +66,11 @@ import java.nio.file.Path;
  * <h2>Buffer Pool (Phase 9): every {@code Transaction} sits on a shared cache, not raw disk</h2>
  * {@link Transaction} is constructed against a {@link BufferPool} rather than the raw
  * {@link DiskManager} directly, so a transaction's writes only reach an in-memory cache when it
- * commits, not necessarily real disk. {@link #execute} calls {@code bufferPool.flushAll()}
- * immediately after every successful commit to keep a committed transaction durable.
+ * commits, not necessarily real disk. Durability comes from the write-ahead log: a commit is
+ * acknowledged once its log record is durable (NO-FORCE). This class used to also flush every
+ * dirty page to disk, with an fsync each, after every commit (FORCE); with the log in place that
+ * was redundant work on the critical path — and done while still holding the transaction's
+ * locks.
  *
  * <h2>Write-Ahead Log and recovery (Phase 11)</h2>
  * Every {@link Transaction} this class creates is also given the session's shared
@@ -125,6 +128,7 @@ public final class Session implements AutoCloseable {
         Files.deleteIfExists(walPathFor(diskManager)); // brand-new database: any stale WAL debris is irrelevant
         WriteAheadLog wal = WriteAheadLog.open(walPathFor(diskManager));
         Catalog.bootstrap(diskManager);
+        diskManager.sync(); // the catalog root is written directly, not through the log
         return new Session(diskManager, new BufferPool(diskManager, DEFAULT_BUFFER_POOL_CAPACITY), new LockManager(), wal, true);
     }
 
@@ -136,6 +140,7 @@ public final class Session implements AutoCloseable {
      */
     public static Session bootstrap(DiskManager diskManager, BufferPool bufferPool, LockManager lockManager, WriteAheadLog wal) throws IOException {
         Catalog.bootstrap(diskManager); // a one-time, directly-against-disk setup step — see Catalog's own docs
+        diskManager.sync(); // the catalog root is written directly, not through the log
         return new Session(diskManager, bufferPool, lockManager, wal, false);
     }
 
@@ -163,8 +168,7 @@ public final class Session implements AutoCloseable {
             requireActiveTransaction();
             Transaction txn = activeTransaction;
             try {
-                txn.commit();
-                bufferPool.flushAll(); // FORCE: make this commit durable before acknowledging it
+                txn.commit(); // durable once this returns: the log record is fsynced (group commit)
             } finally {
                 lockManager.releaseAll(txn);
                 clearActiveTransaction();
@@ -193,7 +197,6 @@ public final class Session implements AutoCloseable {
             ExecutionResult result = executor.execute(statement);
             txn.commit();
             committed = true;
-            bufferPool.flushAll(); // FORCE, same as the explicit-transaction path above
             return result;
         } finally {
             if (!committed) {
@@ -251,9 +254,18 @@ public final class Session implements AutoCloseable {
             rollbackActiveTransaction();
         }
         if (ownsResources) {
-            bufferPool.flushAll(); // defensive: every commit already flushes, so this should be a no-op in practice
-            diskManager.close();
-            wal.close();
+            try {
+                if (wal.isHealthy()) {
+                    // Clean shutdown = checkpoint: data file durable, log empty, fast next open.
+                    wal.checkpoint(() -> {
+                        bufferPool.flushAll();
+                        diskManager.sync();
+                    });
+                }
+            } finally {
+                diskManager.close();
+                wal.close();
+            }
         }
     }
 
