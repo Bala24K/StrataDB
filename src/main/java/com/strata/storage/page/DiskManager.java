@@ -6,6 +6,7 @@ import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
 import java.nio.file.Path;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * DiskManager is the boundary between StrataDB and the filesystem. It owns exactly
@@ -48,6 +49,13 @@ public final class DiskManager implements PageStore, AutoCloseable {
     private final AtomicInteger numPages;
     private final Path path;
 
+    // Instrumentation (see com.strata.metrics.Metrics). Atomic so other threads can read them
+    // without taking this object's monitor; the cost is negligible next to real I/O.
+    private final AtomicLong pageReads = new AtomicLong();
+    private final AtomicLong pageWrites = new AtomicLong();
+    private final AtomicLong fsyncs = new AtomicLong();
+    private final AtomicLong pagesAllocated = new AtomicLong();
+
     /**
      * Opens (creating if necessary) the database file at {@code dbFile} and
      * figures out how many pages it already contains.
@@ -77,6 +85,7 @@ public final class DiskManager implements PageStore, AutoCloseable {
         long offset = toByteOffset(pageId);
         ByteBuffer buffer = ByteBuffer.allocate(Page.PAGE_SIZE);
         readFully(buffer, offset);
+        pageReads.incrementAndGet();
         return new Page(buffer.array());
     }
 
@@ -87,7 +96,25 @@ public final class DiskManager implements PageStore, AutoCloseable {
         long offset = toByteOffset(pageId);
         ByteBuffer buffer = ByteBuffer.wrap(page.getData());
         writeFully(buffer, offset);
+        pageWrites.incrementAndGet();
         channel.force(false); // fsync data (not necessarily file metadata) — see class javadoc
+        fsyncs.incrementAndGet();
+    }
+
+    public long pageReadCount() {
+        return pageReads.get();
+    }
+
+    public long pageWriteCount() {
+        return pageWrites.get();
+    }
+
+    public long fsyncCount() {
+        return fsyncs.get();
+    }
+
+    public long pagesAllocatedCount() {
+        return pagesAllocated.get();
     }
 
     /**
@@ -100,6 +127,7 @@ public final class DiskManager implements PageStore, AutoCloseable {
     public synchronized int allocatePage() throws IOException {
         int newPageId = numPages.getAndIncrement();
         writePage(newPageId, new Page());
+        pagesAllocated.incrementAndGet();
         return newPageId;
     }
 

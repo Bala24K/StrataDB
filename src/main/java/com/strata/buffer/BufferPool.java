@@ -63,6 +63,12 @@ public final class BufferPool implements PageStore {
     private final int capacity;
     private final LinkedHashMap<Integer, Frame> cache;
 
+    // Instrumentation; guarded by this object's monitor like everything else here.
+    private long hits;
+    private long misses;
+    private long evictions;
+    private long dirtyWritebacks;
+
     public BufferPool(PageStore diskStore, int capacity) {
         if (capacity < 1) {
             throw new IllegalArgumentException("capacity must be at least 1, got " + capacity);
@@ -80,6 +86,7 @@ public final class BufferPool implements PageStore {
                 } catch (IOException e) {
                     throw new UncheckedIOException(e);
                 }
+                evictions++;
                 return true;
             }
         };
@@ -89,8 +96,10 @@ public final class BufferPool implements PageStore {
     public synchronized Page readPage(int pageId) throws IOException {
         Frame frame = cache.get(pageId); // access-order LinkedHashMap: this counts as "recently used"
         if (frame != null) {
+            hits++;
             return frame.page.copy(); // never hand out the cache's own live object — see Page.copy()
         }
+        misses++;
         Page page = diskStore.readPage(pageId);
         Frame newFrame = new Frame();
         newFrame.page = page; // safe to keep as-is: fresh from diskStore, nothing else references it yet
@@ -152,6 +161,27 @@ public final class BufferPool implements PageStore {
         if (frame.dirty) {
             diskStore.writePage(pageId, frame.page);
             frame.dirty = false;
+            dirtyWritebacks++;
         }
+    }
+
+    public synchronized long hitCount() {
+        return hits;
+    }
+
+    public synchronized long missCount() {
+        return misses;
+    }
+
+    public synchronized long evictionCount() {
+        return evictions;
+    }
+
+    public synchronized long dirtyWritebackCount() {
+        return dirtyWritebacks;
+    }
+
+    public int capacity() {
+        return capacity;
     }
 }

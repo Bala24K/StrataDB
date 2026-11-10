@@ -48,7 +48,8 @@ public final class TestRunner {
         com.strata.network.ServerRegressionTest.class,
         com.strata.recovery.RecoveryHardeningTest.class,
         com.strata.recovery.CrashInjectionTest.class,
-        com.strata.recovery.ProcessKillTest.class
+        com.strata.recovery.ProcessKillTest.class,
+        com.strata.engine.MetricsTest.class
     );
 
     public static void main(String[] args) throws Exception {

@@ -3,6 +3,7 @@ package com.strata.engine;
 import com.strata.buffer.BufferPool;
 import com.strata.catalog.Catalog;
 import com.strata.lock.LockManager;
+import com.strata.metrics.Metrics;
 import com.strata.recovery.WriteAheadLog;
 import com.strata.storage.page.DiskManager;
 import com.strata.transaction.Session;
@@ -120,6 +121,26 @@ public final class Database implements AutoCloseable {
 
     public WriteAheadLog wal() {
         return wal;
+    }
+
+    /** A snapshot of every engine counter; subtract two snapshots to measure a workload. */
+    public Metrics metrics() {
+        return new Metrics(
+            diskManager.pageReadCount(),
+            diskManager.pageWriteCount(),
+            diskManager.fsyncCount(),
+            diskManager.pagesAllocatedCount(),
+            bufferPool.hitCount(),
+            bufferPool.missCount(),
+            bufferPool.evictionCount(),
+            bufferPool.dirtyWritebackCount(),
+            wal.commitCount(),
+            wal.bytesLogged(),
+            wal.fsyncCount(),
+            lockManager.acquisitionCount(),
+            lockManager.waitCount(),
+            lockManager.waitNanos(),
+            lockManager.timeoutCount());
     }
 
     /** Flushes cached pages and closes the file and log. Sessions must not be used afterwards. */

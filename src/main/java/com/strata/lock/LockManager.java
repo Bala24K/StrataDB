@@ -4,6 +4,7 @@ import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.TimeUnit;
 
 /**
  * Shared (S) and exclusive (X) locks over arbitrary named resources — table names, in how
@@ -84,12 +85,37 @@ public final class LockManager {
     private final Map<Object, Set<Object>> heldByOwner = new HashMap<>();
     private final long defaultTimeoutMillis;
 
+    // Instrumentation; guarded by this object's monitor.
+    private long acquisitions;
+    private long waits;
+    private long waitNanos;
+    private long timeouts;
+
     public LockManager() {
         this(DEFAULT_TIMEOUT_MILLIS);
     }
 
     public LockManager(long defaultTimeoutMillis) {
         this.defaultTimeoutMillis = defaultTimeoutMillis;
+    }
+
+    /** Lock requests made (granted or not). */
+    public synchronized long acquisitionCount() {
+        return acquisitions;
+    }
+
+    /** Requests that couldn't be granted immediately and had to wait. */
+    public synchronized long waitCount() {
+        return waits;
+    }
+
+    /** Total time requests spent waiting, granted or timed out. */
+    public synchronized long waitNanos() {
+        return waitNanos;
+    }
+
+    public synchronized long timeoutCount() {
+        return timeouts;
     }
 
     public void acquireShared(Object owner, Object resource) {
@@ -110,19 +136,30 @@ public final class LockManager {
 
     private synchronized void acquire(Object owner, Object resource, LockMode mode, long timeoutMillis) {
         LockState state = locks.computeIfAbsent(resource, r -> new LockState());
-        long deadline = System.currentTimeMillis() + timeoutMillis;
+        acquisitions++;
 
-        while (!canGrant(state, owner, mode)) {
-            long remaining = deadline - System.currentTimeMillis();
-            if (remaining <= 0) {
-                throw new LockTimeoutException(
-                    "Timed out waiting for a " + mode + " lock on " + resource + " (held by another transaction)");
-            }
+        if (!canGrant(state, owner, mode)) {
+            waits++;
+            // nanoTime, not currentTimeMillis: a wall-clock adjustment must not stretch or cut short a wait.
+            long start = System.nanoTime();
+            long deadline = start + TimeUnit.MILLISECONDS.toNanos(timeoutMillis);
             try {
-                wait(remaining);
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-                throw new LockTimeoutException("Interrupted while waiting for a " + mode + " lock on " + resource);
+                while (!canGrant(state, owner, mode)) {
+                    long remainingNanos = deadline - System.nanoTime();
+                    if (remainingNanos <= 0) {
+                        timeouts++;
+                        throw new LockTimeoutException(
+                            "Timed out waiting for a " + mode + " lock on " + resource + " (held by another transaction)");
+                    }
+                    try {
+                        TimeUnit.NANOSECONDS.timedWait(this, remainingNanos);
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                        throw new LockTimeoutException("Interrupted while waiting for a " + mode + " lock on " + resource);
+                    }
+                }
+            } finally {
+                waitNanos += System.nanoTime() - start;
             }
         }
 

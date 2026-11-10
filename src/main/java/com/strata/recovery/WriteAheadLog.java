@@ -70,6 +70,11 @@ public final class WriteAheadLog implements AutoCloseable {
     /** Set once a commit has failed in a way that leaves memory and the log out of step; see {@link #commit}. */
     private volatile Throwable failure;
 
+    // Instrumentation, written under this object's monitor.
+    private volatile long commitsLogged;
+    private volatile long bytesLogged;
+    private volatile long fsyncs;
+
     private WriteAheadLog(RandomAccessFile file, FileChannel channel) {
         this.file = file;
         this.channel = channel;
@@ -104,6 +109,9 @@ public final class WriteAheadLog implements AutoCloseable {
                 position += channel.write(buffer, position);
             }
             channel.force(true); // the actual write-ahead guarantee: durable before anything is applied
+            fsyncs++;
+            commitsLogged++;
+            bytesLogged += frame.length;
         } catch (IOException | RuntimeException e) {
             failure = e;
             try {
@@ -140,6 +148,18 @@ public final class WriteAheadLog implements AutoCloseable {
                 + "it will be completed by recovery when the database is reopened. "
                 + "No further commits are accepted until then.", e);
         }
+    }
+
+    public long commitCount() {
+        return commitsLogged;
+    }
+
+    public long bytesLogged() {
+        return bytesLogged;
+    }
+
+    public long fsyncCount() {
+        return fsyncs;
     }
 
     /** True until a commit fails in a way that requires a restart; see {@link #commit}. */
