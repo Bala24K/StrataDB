@@ -1,6 +1,7 @@
 package com.strata.storage.page;
 
 import java.io.IOException;
+import java.util.Map;
 
 /**
  * The page-level contract that everything above the storage layer (a heap file, a catalog, a
@@ -56,5 +57,14 @@ public interface PageStore {
      * the end of WAL recovery.
      */
     default void sync() throws IOException {
+    }
+
+    /**
+     * A per-database, thread-safe map from a heap file's first page id to its last known page
+     * id, letting inserts start at the tail (see {@code HeapTable}). Hints are advisory: readers
+     * must validate them. {@code null} (the default) means "no hints": inserts walk the chain.
+     */
+    default Map<Integer, Integer> heapTailHints() {
+        return null;
     }
 }

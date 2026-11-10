@@ -50,7 +50,9 @@ public final class TestRunner {
         com.strata.recovery.CrashInjectionTest.class,
         com.strata.recovery.ProcessKillTest.class,
         com.strata.engine.MetricsTest.class,
-        com.strata.recovery.GroupCommitCheckpointTest.class
+        com.strata.recovery.GroupCommitCheckpointTest.class,
+        com.strata.storage.HeapTailHintTest.class,
+        com.strata.storage.InPlaceUpdateTest.class
     );
 
     public static void main(String[] args) throws Exception {

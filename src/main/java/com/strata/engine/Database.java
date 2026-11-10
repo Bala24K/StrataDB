@@ -44,7 +44,7 @@ public final class Database implements AutoCloseable {
         }
 
         public static Options defaults() {
-            return new Options(64, 5_000, 16L * 1024 * 1024);
+            return new Options(2048, 5_000, 16L * 1024 * 1024); // 8 MiB of 4 KiB pages
         }
 
         public Options withBufferPoolPages(int pages) {

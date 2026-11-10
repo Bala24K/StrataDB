@@ -7,6 +7,7 @@ import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * An in-memory cache of pages sitting in front of a real {@link PageStore} (normally a
@@ -183,5 +184,13 @@ public final class BufferPool implements PageStore {
 
     public int capacity() {
         return capacity;
+    }
+
+    /** Tail-page hints for heap files in this database; see {@code HeapTable}. */
+    private final Map<Integer, Integer> heapTailHints = new ConcurrentHashMap<>();
+
+    @Override
+    public Map<Integer, Integer> heapTailHints() {
+        return heapTailHints;
     }
 }

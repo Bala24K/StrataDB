@@ -43,15 +43,20 @@ public class CrashInjectionTest {
     private static final String PAD = "p".repeat(300); // ~12 rows per page: evictions and page growth happen quickly
 
     public void testRandomWorkloadsSurviveInjectedWriteFailures() throws Exception {
-        int crashedDuringCommit = 0;
-        for (long seed = 1; seed <= 24; seed++) {
-            if (runOne(seed)) crashedDuringCommit++;
+        java.util.EnumMap<Phase, Integer> crashes = new java.util.EnumMap<>(Phase.class);
+        for (long seed = 1; seed <= 40; seed++) {
+            crashes.merge(runOne(seed), 1, Integer::sum);
         }
-        assertTrue(crashedDuringCommit > 0, "the seeds should exercise at least one crash inside COMMIT");
+        // Coverage, not correctness: the seeds must actually crash in every interesting phase.
+        for (Phase phase : List.of(Phase.STATEMENT, Phase.COMMIT, Phase.CHECKPOINT)) {
+            assertTrue(crashes.getOrDefault(phase, 0) > 0, "no seed crashed during " + phase + ": " + crashes);
+        }
     }
 
-    /** @return true if the injected failure surfaced from a COMMIT */
-    private static boolean runOne(long seed) throws Exception {
+    /** Where the injected failure surfaced. */
+    enum Phase { NONE, STATEMENT, COMMIT, CHECKPOINT }
+
+    private static Phase runOne(long seed) throws Exception {
         Random rnd = new Random(seed);
         Path db = Files.createTempFile("stratadb-crash", ".db");
         Files.deleteIfExists(db);
@@ -64,12 +69,12 @@ public class CrashInjectionTest {
             }
 
             TreeMap<Integer, Long> committed = new TreeMap<>();
-            boolean crashedInCommit = false;
+            Phase crashedIn = Phase.NONE;
 
             DiskManager dm = new DiskManager(db);
             WriteAheadLog log = Session.prepareWal(dm);
-            FaultyStore faulty = new FaultyStore(dm, 10 + rnd.nextInt(120), rnd.nextBoolean());
-            BufferPool pool = new BufferPool(faulty, 6); // tiny: forces eviction write-back mid-transaction
+            FaultyStore faulty = new FaultyStore(dm, 10 + rnd.nextInt(400), rnd.nextBoolean());
+            BufferPool pool = new BufferPool(faulty, 4); // tiny: forces eviction write-back mid-transaction
             Session s = Session.open(dm, pool, new LockManager(1_000), log);
             int nextId = 0;
 
@@ -100,13 +105,14 @@ public class CrashInjectionTest {
                     }
                 } catch (IOException | RuntimeException e) {
                     if (!faulty.failed) throw e; // a genuine bug, not our injected crash
+                    crashedIn = Phase.STATEMENT;
                     break workload; // crashed mid-transaction: nothing of it may survive
                 }
                 if (rnd.nextInt(5) == 0) {
                     s.execute("ROLLBACK;");
                     continue;
                 }
-                if (step % 25 == 24) {
+                if (step % 10 == 9) {
                     try {
                         // Data pages reach the file only via eviction and checkpoints, so crash
                         // inside checkpoint flushes too. A failed checkpoint must not truncate the log.
@@ -116,6 +122,7 @@ public class CrashInjectionTest {
                         });
                     } catch (IOException | RuntimeException e) {
                         if (!faulty.failed) throw e;
+                        crashedIn = Phase.CHECKPOINT;
                         s.execute("ROLLBACK;"); // the open transaction never committed
                         break;
                     }
@@ -126,7 +133,7 @@ public class CrashInjectionTest {
                 } catch (IOException | RuntimeException e) {
                     if (!faulty.failed) throw e;
                     committed = pending; // the WAL record was durable before the data write failed
-                    crashedInCommit = true;
+                    crashedIn = Phase.COMMIT;
                     break;
                 }
             }
@@ -147,7 +154,7 @@ public class CrashInjectionTest {
                 // and the recovered database must accept new work
                 check.execute("INSERT INTO kv VALUES (" + (nextId + 1) + ", 1, 'after');");
             }
-            return crashedInCommit;
+            return crashedIn;
         } finally {
             Files.deleteIfExists(db);
             Files.deleteIfExists(wal);

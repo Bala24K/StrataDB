@@ -154,6 +154,80 @@ public final class SlottedPage {
         return page.getBytes(slotOffset(slotIndex), length);
     }
 
+    /**
+     * Replaces the record at {@code slotIndex} with {@code record}, keeping its slot index (and
+     * so its {@link RecordId}). Returns false, changing nothing, if the new version can't fit on
+     * this page even after {@link #compact() compaction}; the caller then moves the record.
+     */
+    public boolean updateRecord(int slotIndex, byte[] record) {
+        validateSlotIndex(slotIndex);
+        int oldLength = slotLength(slotIndex);
+        if (oldLength == TOMBSTONE) {
+            throw new NoSuchElementException("Slot " + slotIndex + " has been deleted");
+        }
+        if (record.length <= oldLength) {
+            // Shrinking or same size: overwrite where it is. The tail of the old version becomes
+            // a hole that compact() can reclaim later.
+            page.putBytes(slotOffset(slotIndex), record);
+            writeSlot(slotIndex, slotOffset(slotIndex), record.length);
+            return true;
+        }
+        if (getFreeSpaceBytes() < record.length) {
+            // Not enough contiguous room; would there be once holes (including this record's own
+            // old bytes) are squeezed out?
+            if (getFreeSpaceBytes() + holeBytes() + oldLength < record.length) {
+                return false;
+            }
+            writeSlot(slotIndex, 0, TOMBSTONE); // its old bytes are garbage from here on
+            compact();
+        }
+        int recordOffset = getFreeSpaceOffset() - record.length;
+        page.putBytes(recordOffset, record);
+        writeSlot(slotIndex, recordOffset, record.length);
+        setFreeSpaceOffset(recordOffset);
+        return true;
+    }
+
+    /** Bytes in the data area that belong to no live record (left by deletes and shrinking updates). */
+    public int holeBytes() {
+        int live = 0;
+        for (int i = 0; i < getNumSlots(); i++) {
+            int len = slotLength(i);
+            if (len != TOMBSTONE) live += len;
+        }
+        return (Page.PAGE_SIZE - getFreeSpaceOffset()) - live;
+    }
+
+    /**
+     * Whether a record of this length would fit once {@link #compact()} has reclaimed holes.
+     */
+    public boolean canFitAfterCompaction(int recordLength) {
+        return getFreeSpaceBytes() + holeBytes() >= recordLength + SLOT_SIZE;
+    }
+
+    /**
+     * Rewrites the data area so live records are packed against the end of the page with no
+     * holes between them. Only slot <em>contents</em> (offsets) change, never slot indices, so
+     * every existing {@link RecordId} stays valid — the property the class docs promised would
+     * make adding compaction later safe.
+     */
+    public void compact() {
+        int numSlots = getNumSlots();
+        byte[][] live = new byte[numSlots][];
+        for (int i = 0; i < numSlots; i++) {
+            int len = slotLength(i);
+            if (len != TOMBSTONE) live[i] = page.getBytes(slotOffset(i), len);
+        }
+        int offset = Page.PAGE_SIZE;
+        for (int i = 0; i < numSlots; i++) {
+            if (live[i] == null) continue;
+            offset -= live[i].length;
+            page.putBytes(offset, live[i]);
+            writeSlot(i, offset, live[i].length);
+        }
+        setFreeSpaceOffset(offset);
+    }
+
     /** Marks the record at {@code slotIndex} as deleted. Its slot index stays reserved (never reused). */
     public void deleteRecord(int slotIndex) {
         validateSlotIndex(slotIndex);
@@ -161,6 +235,20 @@ public final class SlottedPage {
             throw new NoSuchElementException("Slot " + slotIndex + " is already deleted");
         }
         writeSlot(slotIndex, 0, TOMBSTONE);
+    }
+
+    /**
+     * Whether this page's header is self-consistent, i.e. it has been {@link #format formatted}.
+     * An all-zero page (allocated but never formatted, e.g. by a transaction that rolled back)
+     * is not: its free-space offset of 0 lies inside the header.
+     */
+    public boolean isFormatted() {
+        int numSlots = getNumSlots();
+        int freeSpaceOffset = getFreeSpaceOffset();
+        return numSlots >= 0
+            && numSlots <= (Page.PAGE_SIZE - HEADER_SIZE) / SLOT_SIZE
+            && freeSpaceOffset >= HEADER_SIZE + numSlots * SLOT_SIZE
+            && freeSpaceOffset <= Page.PAGE_SIZE;
     }
 
     public boolean isDeleted(int slotIndex) {

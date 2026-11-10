@@ -6,6 +6,7 @@ import com.strata.storage.page.Page;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 
 /**
  * A table with no guaranteed record ordering — a <b>heap file</b>, in database terminology —
@@ -75,7 +76,7 @@ public final class HeapTable {
                 + "overflow pages for large values, not supported yet");
         }
 
-        int currentPageId = firstPageId;
+        int currentPageId = startPageForInsert();
         while (true) {
             Page page = pageStore.readPage(currentPageId);
             SlottedPage slotted = new SlottedPage(page);
@@ -83,12 +84,24 @@ public final class HeapTable {
             if (slotted.canFit(record.length)) {
                 int slotIndex = slotted.insertRecord(record);
                 pageStore.writePage(currentPageId, page);
+                if (!slotted.hasNextPage()) {
+                    rememberTail(currentPageId);
+                }
                 return new RecordId(currentPageId, slotIndex);
             }
 
             if (slotted.hasNextPage()) {
                 currentPageId = slotted.getNextPageId();
                 continue;
+            }
+
+            if (slotted.canFitAfterCompaction(record.length)) {
+                // The tail page has enough dead space (deletes, shrinking updates) once packed.
+                slotted.compact();
+                int slotIndex = slotted.insertRecord(record);
+                pageStore.writePage(currentPageId, page);
+                rememberTail(currentPageId);
+                return new RecordId(currentPageId, slotIndex);
             }
 
             // Out of room on every existing page — grow the table by one page and link it in.
@@ -100,6 +113,66 @@ public final class HeapTable {
 
             currentPageId = newPageId; // loop once more; guaranteed to fit on an empty page
         }
+    }
+
+    /**
+     * Where an insert should start looking for room: the table's last page if the shared tail
+     * hint is usable, otherwise the first page.
+     *
+     * <p>Inserts used to always start at the first page and walk the whole chain, so loading N
+     * rows cost O(N²) page reads (each a 4 KiB buffer pool copy): 660 KB allocated per row at
+     * 20,000 rows. The hint makes it O(1). Space usage barely changes: pages before the tail
+     * were passed over because the record didn't fit, and deleted space isn't reclaimed in
+     * place anyway (tombstones).
+     *
+     * <p><b>Why a stale hint is safe.</b> Hints are shared by all transactions and may be set
+     * by one that later rolls back, leaving the hint on a page that never became part of the
+     * committed chain. Such a page is still all zeros outside that transaction's overlay, so
+     * {@link SlottedPage#isFormatted()} rejects it and we fall back to the first page. A hint on
+     * a real page of this chain that has since gained a successor is harmless: the walk simply
+     * continues from it. A hint can't point into another table's chain because page ids are
+     * never reused (there is no free-page list yet; adding one must revisit this).
+     */
+    private int startPageForInsert() throws IOException {
+        Map<Integer, Integer> hints = pageStore.heapTailHints();
+        if (hints == null) {
+            return firstPageId;
+        }
+        Integer hint = hints.get(firstPageId);
+        if (hint == null || hint == firstPageId || hint < 0 || hint >= pageStore.getNumPages()) {
+            return firstPageId;
+        }
+        return new SlottedPage(pageStore.readPage(hint)).isFormatted() ? hint : firstPageId;
+    }
+
+    private void rememberTail(int pageId) {
+        Map<Integer, Integer> hints = pageStore.heapTailHints();
+        if (hints != null) {
+            hints.put(firstPageId, pageId);
+        }
+    }
+
+    /**
+     * Replaces the record at {@code rid}. Updates in place (same {@link RecordId}) whenever the
+     * new version fits on the record's current page; otherwise moves it (delete + insert) and
+     * returns the new id. Callers must re-point anything that referenced the old id (indexes) only
+     * when the returned id differs.
+     */
+    public RecordId update(RecordId rid, byte[] record) throws IOException {
+        if (record.length > SlottedPage.maxRecordSize()) {
+            // Checked before touching anything, so a too-large update changes nothing.
+            throw new IllegalArgumentException(
+                "Record of " + record.length + " bytes can never fit on a page (max is "
+                + SlottedPage.maxRecordSize() + " bytes)");
+        }
+        Page page = pageStore.readPage(rid.getPageId());
+        SlottedPage slotted = new SlottedPage(page);
+        if (slotted.updateRecord(rid.getSlotIndex(), record)) {
+            pageStore.writePage(rid.getPageId(), page);
+            return rid;
+        }
+        delete(rid);
+        return insert(record);
     }
 
     /** Reads the record at {@code rid}. */

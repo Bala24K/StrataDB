@@ -202,6 +202,12 @@ public final class Transaction implements PageStore {
         return underlying.getNumPages();
     }
 
+    /** Shared with every transaction on the same store; hints are validated by their readers. */
+    @Override
+    public Map<Integer, Integer> heapTailHints() {
+        return underlying.heapTailHints();
+    }
+
     /** Page ids this transaction reserved in the underlying store, in allocation order. */
     public List<Integer> allocatedPageIds() {
         return List.copyOf(allocatedPageIds);

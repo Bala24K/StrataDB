@@ -155,3 +155,23 @@ Interpretation:
 - **Reads are untouched**, as expected; T7/T8 target them.
 - **Not improved:** write amplification (still full page images, about 4.2 KB/row) and bulk insert
   allocation (660 KB/row) — the next targets.
+
+### After T7: insert tail hint, in-place UPDATE, page compaction (`bench-results/t7-storage-paths`)
+
+| scenario | T6 ops/s | T7 ops/s | change | alloc KB/op (T6 → T7) | WAL B/op (T6 → T7) |
+|---|---:|---:|---:|---:|---:|
+| insert_batched (rows/s) | 12,189 | 178,584 | **14.6×** | 660 → 7.2 | 74 → 74 |
+| update_indexed | 881 | 1,352 | 1.5× | 1,893 → 295 | 16,342 → 4,136 |
+| insert_autocommit | 1,382 | 1,566 | 1.1× | 89 → 27 | 4,202 → 4,202 |
+| mixed_80read_20write t8 | 3,330 | 4,170 | 1.25× | 527 → 247 | ~1,630 |
+
+Interpretation:
+
+- **Bulk load was O(N²) in page reads**; with the tail hint each insert touches one or two pages.
+  The 660 KB/row of allocation was 4 KiB page copies from walking ~160 pages per insert.
+  Per-transaction latency for 500-row batches fell from 45 ms to 2.7 ms (p50).
+- **UPDATE no longer rewrites every index.** An in-place update keeps the RecordId, so index
+  entries whose key didn't change stay put: 4.1 KB of log per update (one heap page) instead
+  of 16.3 KB (heap page + old and new copies + index bucket pages).
+- Point lookups and scans are unchanged: they're bound by the static hash index and by
+  copying every page through the buffer pool. That's T8.

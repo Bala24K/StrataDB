@@ -186,13 +186,37 @@ public final class Executor {
             }
             Row newRow = new Row(newValues);
 
-            maintainIndexesOnDelete(schema, row, stored.id());
-            table.delete(stored.id());
-            RecordId newRid = table.insert(RowSerializer.serialize(newRow, schema));
-            maintainIndexesOnInsert(schema, newRow, newRid);
+            // In place when it fits (same RecordId), moved otherwise. Candidates were fully
+            // materialized above, so a moved row is never visited twice (the "Halloween problem").
+            RecordId newRid = table.update(stored.id(), RowSerializer.serialize(newRow, schema));
+            maintainIndexesOnUpdate(schema, row, stored.id(), newRow, newRid);
             updatedCount++;
         }
         return new ExecutionResult.RowsUpdated(updatedCount);
+    }
+
+    /**
+     * Re-points only the index entries that actually changed: an index needs work when its key
+     * changed or the row moved. An UPDATE of a non-indexed column that stays in place touches no
+     * index page at all. (It used to delete and re-insert every index entry of every updated row,
+     * because UPDATE was always delete + insert, which always moved the row.)
+     */
+    private void maintainIndexesOnUpdate(TableInfo schema, Row oldRow, RecordId oldRid, Row newRow, RecordId newRid) throws IOException {
+        for (IndexInfo indexInfo : catalog.getIndexesForTable(schema.getName())) {
+            int col = columnIndex(schema, indexInfo.columnName());
+            Object oldKey = oldRow.get(col);
+            Object newKey = newRow.get(col);
+            if (oldRid.equals(newRid) && java.util.Objects.equals(oldKey, newKey)) {
+                continue;
+            }
+            HashIndex index = catalog.openIndex(indexInfo);
+            if (oldKey != null) {
+                index.delete(oldKey, oldRid);
+            }
+            if (newKey != null) {
+                index.insert(newKey, newRid);
+            }
+        }
     }
 
     // ---- DELETE ----
