@@ -48,6 +48,21 @@ import java.nio.file.Path;
  * it until the owning transaction ends. Multiple {@code Session}s constructed against the
  * <em>same</em> {@link LockManager} correctly block each other's conflicting statements.
  *
+ * <h2>Catalog locking</h2>
+ * The catalog is shared state: every table's and index's metadata lives in the same heap pages
+ * rooted at page 0. Locking only table names left it outside the protocol, which caused two
+ * bugs: two concurrent {@code CREATE TABLE}s rewrote the same catalog page and one table was
+ * lost; and an explicit transaction that loaded the catalog at {@code BEGIN} could miss an
+ * index created afterwards, so its inserts never updated that index. Now every statement first
+ * takes a lock on {@link #CATALOG_RESOURCE}: <b>exclusive</b> for DDL, <b>shared</b> for
+ * everything else, held to the end of the transaction like every other lock. A transaction
+ * loads the catalog only after its first catalog lock is held; since no DDL can commit while
+ * that shared lock is held, the loaded copy can't go stale for the rest of the transaction.
+ *
+ * <p>The cost: an open transaction blocks DDL, and in-progress DDL blocks every other
+ * statement. That's catalog-wide rather than per-table because all catalog entries share
+ * physical pages. DDL is rare, so this coarse lock is the right trade for now.
+ *
  * <h2>Buffer Pool (Phase 9): every {@code Transaction} sits on a shared cache, not raw disk</h2>
  * {@link Transaction} is constructed against a {@link BufferPool} rather than the raw
  * {@link DiskManager} directly, so a transaction's writes only reach an in-memory cache when it
@@ -159,17 +174,22 @@ public final class Session implements AutoCloseable {
         LockRequest lockRequest = lockRequestFor(statement);
 
         if (activeTransaction != null) {
-            // Inside an explicit transaction: acquire the lock under the *transaction's*
-            // identity so it's held until COMMIT/ROLLBACK releases everything at once, not
+            // Inside an explicit transaction: acquire the locks under the *transaction's*
+            // identity so they're held until COMMIT/ROLLBACK releases everything at once, not
             // released after just this one statement.
-            acquireLock(activeTransaction, lockRequest);
+            acquireLocks(activeTransaction, lockRequest);
+            if (activeExecutor == null) {
+                // First statement of this transaction: only now, with the catalog lock held,
+                // is it safe to load the catalog (see the class docs on catalog locking).
+                activeExecutor = new Executor(Catalog.open(activeTransaction));
+            }
             return activeExecutor.execute(statement);
         }
 
-        // Autocommit: this one statement gets its own transaction, its lock held only for its
+        // Autocommit: this one statement gets its own transaction, its locks held only for its
         // own duration, applied and made durable immediately.
         Transaction txn = new Transaction(bufferPool, wal);
-        acquireLock(txn, lockRequest);
+        acquireLocks(txn, lockRequest);
         try {
             Executor executor = new Executor(Catalog.open(txn));
             ExecutionResult result = executor.execute(statement);
@@ -194,7 +214,7 @@ public final class Session implements AutoCloseable {
                 "Already inside a transaction — nested BEGIN isn't supported (no SAVEPOINT yet)");
         }
         activeTransaction = new Transaction(bufferPool, wal);
-        activeExecutor = new Executor(Catalog.open(activeTransaction));
+        activeExecutor = null; // created lazily, after the first statement's catalog lock is held
     }
 
     private void requireActiveTransaction() {
@@ -208,25 +228,47 @@ public final class Session implements AutoCloseable {
         activeExecutor = null;
     }
 
-    private void acquireLock(Transaction owner, LockRequest request) {
-        if (request.mode() == LockManager.LockMode.SHARED) {
-            lockManager.acquireShared(owner, request.tableName());
+    /**
+     * The lock resource standing for the system catalog. A record type of its own, so it can
+     * never be equal to any table-name {@code String}, whatever a user names their table.
+     */
+    private record CatalogResource() {}
+
+    static final Object CATALOG_RESOURCE = new CatalogResource();
+
+    /** Catalog lock first, then the table lock: one global acquisition order for every statement. */
+    private void acquireLocks(Transaction owner, LockRequest request) {
+        acquire(owner, CATALOG_RESOURCE, request.catalogMode());
+        acquire(owner, request.tableName(), request.tableMode());
+    }
+
+    private void acquire(Transaction owner, Object resource, LockManager.LockMode mode) {
+        if (mode == LockManager.LockMode.SHARED) {
+            lockManager.acquireShared(owner, resource);
         } else {
-            lockManager.acquireExclusive(owner, request.tableName());
+            lockManager.acquireExclusive(owner, resource);
         }
     }
 
-    private record LockRequest(String tableName, LockManager.LockMode mode) {}
+    private record LockRequest(String tableName, LockManager.LockMode tableMode, LockManager.LockMode catalogMode) {
+        static LockRequest dml(String table, LockManager.LockMode tableMode) {
+            return new LockRequest(table, tableMode, LockManager.LockMode.SHARED);
+        }
+
+        static LockRequest ddl(String table) {
+            return new LockRequest(table, LockManager.LockMode.EXCLUSIVE, LockManager.LockMode.EXCLUSIVE);
+        }
+    }
 
     /** Every statement Executor actually runs touches exactly one named table — Begin/Commit/Rollback never reach here. */
     private static LockRequest lockRequestFor(Statement statement) {
         return switch (statement) {
-            case Statement.CreateTable stmt -> new LockRequest(stmt.tableName(), LockManager.LockMode.EXCLUSIVE);
-            case Statement.CreateIndex stmt -> new LockRequest(stmt.tableName(), LockManager.LockMode.EXCLUSIVE);
-            case Statement.Insert stmt -> new LockRequest(stmt.tableName(), LockManager.LockMode.EXCLUSIVE);
-            case Statement.Update stmt -> new LockRequest(stmt.tableName(), LockManager.LockMode.EXCLUSIVE);
-            case Statement.Delete stmt -> new LockRequest(stmt.tableName(), LockManager.LockMode.EXCLUSIVE);
-            case Statement.Select stmt -> new LockRequest(stmt.tableName(), LockManager.LockMode.SHARED);
+            case Statement.CreateTable stmt -> LockRequest.ddl(stmt.tableName());
+            case Statement.CreateIndex stmt -> LockRequest.ddl(stmt.tableName());
+            case Statement.Insert stmt -> LockRequest.dml(stmt.tableName(), LockManager.LockMode.EXCLUSIVE);
+            case Statement.Update stmt -> LockRequest.dml(stmt.tableName(), LockManager.LockMode.EXCLUSIVE);
+            case Statement.Delete stmt -> LockRequest.dml(stmt.tableName(), LockManager.LockMode.EXCLUSIVE);
+            case Statement.Select stmt -> LockRequest.dml(stmt.tableName(), LockManager.LockMode.SHARED);
             case Statement.Begin ignored -> throw new IllegalStateException("unreachable: Begin is handled before lockRequestFor is called");
             case Statement.Commit ignored -> throw new IllegalStateException("unreachable: Commit is handled before lockRequestFor is called");
             case Statement.Rollback ignored -> throw new IllegalStateException("unreachable: Rollback is handled before lockRequestFor is called");

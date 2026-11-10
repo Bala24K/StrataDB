@@ -5,6 +5,7 @@ import static com.strata.testutil.Assert.*;
 import com.strata.buffer.BufferPool;
 import com.strata.executor.ExecutionResult;
 import com.strata.lock.LockManager;
+import com.strata.lock.LockTimeoutException;
 import com.strata.recovery.WriteAheadLog;
 import com.strata.storage.page.DiskManager;
 
@@ -87,6 +88,66 @@ public class ConcurrencyRegressionTest {
         });
     }
 
+    /**
+     * Bug 2: two concurrent CREATE TABLEs both rewrote catalog page 0 and one table vanished.
+     * Now DDL takes an exclusive catalog lock, so the second one waits (here: times out) instead
+     * of silently corrupting the catalog, and succeeds once the first commits.
+     */
+    public void testConcurrentCreateTablesDoNotLoseEitherTable() throws Exception {
+        withDb(300, (dm, bp, lm, wal) -> {
+            Session s1 = Session.bootstrap(dm, bp, lm, wal);
+            Session s2 = Session.open(dm, bp, lm, wal);
+            s1.execute("BEGIN;");
+            s2.execute("BEGIN;");
+            s1.execute("CREATE TABLE x (id INTEGER);");
+            assertThrows(LockTimeoutException.class, () -> s2.execute("CREATE TABLE y (id INTEGER);"),
+                "DDL must wait for another transaction's uncommitted DDL");
+            s1.execute("COMMIT;");
+            s2.execute("CREATE TABLE y (id INTEGER);");
+            s2.execute("COMMIT;");
+
+            Session check = Session.open(dm, bp, lm, wal);
+            assertEquals(0, count(check, "SELECT * FROM x;"));
+            assertEquals(0, count(check, "SELECT * FROM y;"));
+        });
+    }
+
+    /**
+     * Bug 3: an explicit transaction loaded the catalog at BEGIN, so an index created by another
+     * session after that BEGIN was invisible to it, and its inserts were never indexed.
+     */
+    public void testIndexCreatedAfterAnotherSessionsBeginIsStillMaintained() throws Exception {
+        withDb(300, (dm, bp, lm, wal) -> {
+            Session s1 = Session.bootstrap(dm, bp, lm, wal);
+            Session s2 = Session.open(dm, bp, lm, wal);
+            s1.execute("CREATE TABLE t (id INTEGER, v VARCHAR);");
+            s1.execute("INSERT INTO t VALUES (1, 'a');");
+
+            s1.execute("BEGIN;");
+            s2.execute("CREATE INDEX idx_id ON t (id);");
+            s1.execute("INSERT INTO t VALUES (99, 'b');");
+            s1.execute("COMMIT;");
+
+            assertEquals(1, count(s2, "SELECT * FROM t WHERE id = 99;"), "the index must contain the row inserted after BEGIN");
+        });
+    }
+
+    /** Bug 3, other ordering: once a transaction has read the catalog, DDL must wait for it to end. */
+    public void testDdlWaitsForTransactionsThatHaveReadTheCatalog() throws Exception {
+        withDb(300, (dm, bp, lm, wal) -> {
+            Session s1 = Session.bootstrap(dm, bp, lm, wal);
+            Session s2 = Session.open(dm, bp, lm, wal);
+            s1.execute("CREATE TABLE t (id INTEGER);");
+
+            s1.execute("BEGIN;");
+            s1.execute("INSERT INTO t VALUES (7);");
+            assertThrows(LockTimeoutException.class, () -> s2.execute("CREATE INDEX idx_id ON t (id);"));
+            s1.execute("COMMIT;");
+            s2.execute("CREATE INDEX idx_id ON t (id);");
+            assertEquals(1, count(s2, "SELECT * FROM t WHERE id = 7;"));
+        });
+    }
+
     // ---- helpers ----
 
     static int count(Session s, String sql) throws Exception {
@@ -99,12 +160,16 @@ public class ConcurrencyRegressionTest {
     }
 
     static void withDb(DbTest test) throws Exception {
+        withDb(10_000, test);
+    }
+
+    static void withDb(long lockTimeoutMillis, DbTest test) throws Exception {
         Path tmp = Files.createTempFile("stratadb-regression", ".db");
         Files.deleteIfExists(tmp);
         DiskManager dm = new DiskManager(tmp);
         WriteAheadLog wal = Session.prepareWal(dm);
         try {
-            test.run(dm, new BufferPool(dm, 64), new LockManager(10_000), wal);
+            test.run(dm, new BufferPool(dm, 64), new LockManager(lockTimeoutMillis), wal);
         } finally {
             dm.close();
             wal.close();
