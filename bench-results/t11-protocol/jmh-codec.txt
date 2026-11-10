@@ -1,0 +1,36 @@
+Benchmark                                                 Mode  Cnt      Score      Error   Units
+CodecBenchmark.deserializeRow                             avgt    5    252.558 ±  105.298   ns/op
+CodecBenchmark.deserializeRow:gc.alloc.rate               avgt    5   2104.146 ±  910.205  MB/sec
+CodecBenchmark.deserializeRow:gc.alloc.rate.norm          avgt    5    552.002 ±    0.001    B/op
+CodecBenchmark.deserializeRow:gc.count                    avgt    5     28.000             counts
+CodecBenchmark.deserializeRow:gc.time                     avgt    5     33.000                 ms
+CodecBenchmark.deserializeRowInPlace                      avgt    5     70.339 ±   21.278   ns/op
+CodecBenchmark.deserializeRowInPlace:gc.alloc.rate        avgt    5   2615.452 ±  804.846  MB/sec
+CodecBenchmark.deserializeRowInPlace:gc.alloc.rate.norm   avgt    5    192.000 ±    0.001    B/op
+CodecBenchmark.deserializeRowInPlace:gc.count             avgt    5     38.000             counts
+CodecBenchmark.deserializeRowInPlace:gc.time              avgt    5     46.000                 ms
+CodecBenchmark.encodeHundredRowResult                     avgt    5  25300.951 ± 5651.236   ns/op
+CodecBenchmark.encodeHundredRowResult:gc.alloc.rate       avgt    5   3132.648 ±  689.388  MB/sec
+CodecBenchmark.encodeHundredRowResult:gc.alloc.rate.norm  avgt    5  82928.172 ±    0.034    B/op
+CodecBenchmark.encodeHundredRowResult:gc.count            avgt    5     55.000             counts
+CodecBenchmark.encodeHundredRowResult:gc.time             avgt    5     66.000                 ms
+CodecBenchmark.encodeOneRowResult                         avgt    5    357.943 ±   32.161   ns/op
+CodecBenchmark.encodeOneRowResult:gc.alloc.rate           avgt    5   2835.399 ±  260.736  MB/sec
+CodecBenchmark.encodeOneRowResult:gc.alloc.rate.norm      avgt    5   1064.002 ±    0.001    B/op
+CodecBenchmark.encodeOneRowResult:gc.count                avgt    5     63.000             counts
+CodecBenchmark.encodeOneRowResult:gc.time                 avgt    5     65.000                 ms
+CodecBenchmark.parseInsert                                avgt    5    801.413 ±  304.298   ns/op
+CodecBenchmark.parseInsert:gc.alloc.rate                  avgt    5   2195.341 ±  774.065  MB/sec
+CodecBenchmark.parseInsert:gc.alloc.rate.norm             avgt    5   1832.006 ±    0.002    B/op
+CodecBenchmark.parseInsert:gc.count                       avgt    5     51.000             counts
+CodecBenchmark.parseInsert:gc.time                        avgt    5     54.000                 ms
+CodecBenchmark.parseSelect                                avgt    5    776.901 ±  201.334   ns/op
+CodecBenchmark.parseSelect:gc.alloc.rate                  avgt    5   2088.922 ±  546.842  MB/sec
+CodecBenchmark.parseSelect:gc.alloc.rate.norm             avgt    5   1696.005 ±    0.001    B/op
+CodecBenchmark.parseSelect:gc.count                       avgt    5     54.000             counts
+CodecBenchmark.parseSelect:gc.time                        avgt    5     46.000                 ms
+CodecBenchmark.serializeRow                               avgt    5    344.064 ±  109.838   ns/op
+CodecBenchmark.serializeRow:gc.alloc.rate                 avgt    5   1158.917 ±  361.058  MB/sec
+CodecBenchmark.serializeRow:gc.alloc.rate.norm            avgt    5    416.002 ±    0.001    B/op
+CodecBenchmark.serializeRow:gc.count                      avgt    5     29.000             counts
+CodecBenchmark.serializeRow:gc.time                       avgt    5     26.000                 ms

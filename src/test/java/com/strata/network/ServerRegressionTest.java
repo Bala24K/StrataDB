@@ -63,6 +63,22 @@ public class ServerRegressionTest {
         });
     }
 
+    public void testStringNullIsDistinguishableFromSqlNull() throws Exception {
+        withServer(Database.Options.defaults(), server -> {
+            try (DatabaseClient c = connect(server)) {
+                c.execute("CREATE TABLE t (id INTEGER, v VARCHAR);");
+                c.execute("INSERT INTO t VALUES (1, NULL);");
+                c.execute("INSERT INTO t VALUES (2, 'NULL');");
+                List<String> rows = c.execute("SELECT * FROM t;");
+                String sqlNull = rows.get(2).split("\t")[1];
+                String stringNull = rows.get(3).split("\t")[1];
+                assertTrue(Protocol.isNull(sqlNull));
+                assertFalse(Protocol.isNull(stringNull), "the string 'NULL' must not look like SQL NULL");
+                assertEquals("NULL", Protocol.unescape(stringNull));
+            }
+        });
+    }
+
     // ---- helpers ----
 
     private static DatabaseClient connect(DatabaseServer server) throws Exception {

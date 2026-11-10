@@ -3,6 +3,8 @@ package com.strata.bench;
 import com.strata.engine.Database;
 import com.strata.executor.ExecutionResult;
 import com.strata.metrics.Metrics;
+import com.strata.network.DatabaseClient;
+import com.strata.network.DatabaseServer;
 import com.strata.transaction.Session;
 
 import java.io.IOException;
@@ -132,6 +134,8 @@ public final class WorkloadBenchmark {
         for (int t : THREADS) scenarios.put("concurrent_insert_own_table_t" + t, s -> concurrentInsert(s, t, false));
         for (int t : THREADS) scenarios.put("concurrent_insert_same_table_t" + t, s -> concurrentInsert(s, t, true));
         for (int t : THREADS) scenarios.put("mixed_80read_20write_t" + t, s -> mixed(s, t));
+        scenarios.put("net_point_lookup_index", this::netPointLookup);
+        scenarios.put("net_insert_autocommit", this::netInsertAutocommit);
 
         List<List<Result>> grouped = new ArrayList<>();
         for (Map.Entry<String, Scenario> e : scenarios.entrySet()) {
@@ -336,7 +340,58 @@ public final class WorkloadBenchmark {
         }
     }
 
+    // ---- network scenarios: the same work as point_lookup_index / insert_autocommit, over TCP ----
+
+    /**
+     * Indexed point lookups through the TCP server on localhost. Compared with
+     * point_lookup_index, the difference is the cost of the protocol (text encode/parse) plus a
+     * loopback round trip: the number that decides whether a binary protocol is worth building.
+     */
+    Result netPointLookup(Scale s) throws Exception {
+        Path file = Files.createTempFile(workDir, "net", ".db");
+        Files.delete(file);
+        try (DatabaseServer server = DatabaseServer.start(file, 0, benchOptions());
+             DatabaseClient client = new DatabaseClient("localhost", server.getPort())) {
+            try (Session setup = server.database().newSession()) {
+                load(setup, s.bulkRows(), s.batchSize(), true);
+            }
+            Random rnd = new Random(7);
+            LatencyRecorder lat = new LatencyRecorder();
+            Measurement m = Measurement.start(server.database());
+            for (int i = 0; i < s.lookups(); i++) {
+                int key = rnd.nextInt(s.bulkRows());
+                long t0 = System.nanoTime();
+                List<String> response = client.execute("SELECT * FROM t WHERE id = " + key + ";");
+                lat.record(System.nanoTime() - t0);
+                if (!response.get(0).equals("OK ROWS 1")) throw new IllegalStateException("lookup of " + key + ": " + response.get(0));
+            }
+            return m.finish("net_point_lookup_index", "table=" + s.bulkRows() + " lookups=" + s.lookups() + " via localhost TCP",
+                s.lookups(), lat);
+        }
+    }
+
+    Result netInsertAutocommit(Scale s) throws Exception {
+        Path file = Files.createTempFile(workDir, "net", ".db");
+        Files.delete(file);
+        try (DatabaseServer server = DatabaseServer.start(file, 0, benchOptions());
+             DatabaseClient client = new DatabaseClient("localhost", server.getPort())) {
+            client.execute("CREATE TABLE t (id INTEGER, val BIGINT, pad VARCHAR);");
+            LatencyRecorder lat = new LatencyRecorder();
+            Measurement m = Measurement.start(server.database());
+            for (int i = 0; i < s.autocommitRows(); i++) {
+                long t0 = System.nanoTime();
+                client.execute(insertSql(i));
+                lat.record(System.nanoTime() - t0);
+            }
+            return m.finish("net_insert_autocommit", "rows=" + s.autocommitRows() + " via localhost TCP", s.autocommitRows(), lat);
+        }
+    }
+
     // ---- helpers ----
+
+    private static Database.Options benchOptions() {
+        return Database.Options.defaults().withBufferPoolPages(1024).withLockTimeoutMillis(60_000);
+    }
 
     private Database freshDb() throws IOException {
         Path file = Files.createTempFile(workDir, "db", ".db");

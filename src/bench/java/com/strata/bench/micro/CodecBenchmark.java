@@ -58,4 +58,25 @@ public class CodecBenchmark {
     public Row deserializeRow() {
         return RowSerializer.deserialize(encoded, schema);
     }
+
+    @Benchmark
+    public Row deserializeRowInPlace() {
+        return RowSerializer.deserialize(encoded, 0, encoded.length, schema);
+    }
+
+    private final com.strata.executor.ExecutionResult oneRow =
+        new com.strata.executor.ExecutionResult.Rows(List.of("id", "val", "pad"), List.of(row));
+    private final com.strata.executor.ExecutionResult hundredRows =
+        new com.strata.executor.ExecutionResult.Rows(List.of("id", "val", "pad"), java.util.Collections.nCopies(100, row));
+
+    /** Text-protocol encoding of a one-row result: what a binary protocol could save per point query. */
+    @Benchmark
+    public String encodeOneRowResult() {
+        return com.strata.network.Protocol.encode(oneRow);
+    }
+
+    @Benchmark
+    public String encodeHundredRowResult() {
+        return com.strata.network.Protocol.encode(hundredRows);
+    }
 }

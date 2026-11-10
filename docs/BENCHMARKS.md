@@ -270,3 +270,29 @@ Interpretation — a deliberate trade:
 - **Deadlocks now cost microseconds, not the lock timeout.** `LockManagerV2Test` checks that
   a two-transaction cycle (and the S→X upgrade deadlock) is detected in well under a second
   with a 30 s timeout configured.
+
+### T11: is a binary protocol worth it? (`bench-results/t11-protocol`)
+
+The audit proposed replacing the text protocol with a binary one. Measured first:
+
+| | embedded | over localhost TCP | difference |
+|---|---:|---:|---:|
+| indexed point lookup, p50 | 12 µs | 29 µs | +17 µs per statement |
+| autocommit insert, p50 | 650 µs | 786 µs | within the fsync noise floor |
+
+| JMH (`jmh-codec.txt`) | time | allocation |
+|---|---:|---:|
+| `encodeOneRowResult` (text protocol) | 0.36 µs | 1.0 KB |
+| `encodeHundredRowResult` | 25 µs | 83 KB |
+| `parseSelect` (SQL parsing, for scale) | 0.78 µs | 1.7 KB |
+| `deserializeRow` (stream decoder) / `deserializeRowInPlace` (T9) | 253 / 70 ns | 552 / 192 B |
+
+**Decision: keep the text protocol.** Text encoding is about 0.4 µs of the 17 µs round trip; the
+rest is the loopback socket and waking a thread on each side, which a binary format wouldn't
+change. A binary protocol would be a substantial rewrite to save under 1 µs per point query (it
+would matter more for large result sets: ~250 ns per row). The lever that would actually help
+small queries is fewer round trips (pipelining or batching statements), recorded as future work.
+
+What did change in T11: the protocol's last ambiguity is fixed (a VARCHAR whose value is the
+string `NULL` is sent as `\NULL`, so it can't be confused with SQL NULL), and the benchmark
+harness gained the two network scenarios above.

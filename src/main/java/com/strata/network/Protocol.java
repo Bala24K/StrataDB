@@ -32,19 +32,25 @@ import java.util.stream.Collectors;
  * carriage return are escaped as {@code \\}, {@code \t}, {@code \n} and {@code \r} (the same
  * convention as PostgreSQL's text COPY format). Ordinary values are sent unchanged.
  *
- * <h2>Remaining limitation</h2>
- * {@code NULL} is the literal text {@code NULL}, indistinguishable from a VARCHAR whose value
- * is the four letters {@code NULL}. A typed, length-prefixed binary protocol removes this and the
- * parsing cost of text altogether; this text protocol stays because you can drive it from
- * {@code nc localhost <port>}.
+ * <h2>NULL</h2>
+ * SQL NULL is sent as the bare text {@code NULL}. A VARCHAR whose value is exactly the four
+ * letters {@code NULL} is sent as {@code \NULL}: backslash is already the escape character, so
+ * the two can no longer be confused, and {@link #unescape} turns {@code \NULL} back into the
+ * string. Every other value is unaffected.
+ *
+ * <h2>Why still text</h2>
+ * A typed, length-prefixed binary protocol would avoid text parsing, but measurement (see
+ * docs/BENCHMARKS.md, network scenarios) shows the round trip over a local socket costs a few
+ * tens of microseconds next to engine work, so a binary protocol isn't justified yet; the text
+ * protocol keeps the ability to drive the server from {@code nc localhost <port>}.
  */
-final class Protocol {
+public final class Protocol {
 
     static final String END = "END";
 
     private Protocol() {}
 
-    static String encode(ExecutionResult result) {
+    public static String encode(ExecutionResult result) {
         StringBuilder text = new StringBuilder();
         switch (result) {
             case ExecutionResult.Rows rows -> {
@@ -74,7 +80,16 @@ final class Protocol {
     }
 
     static String encodeValue(Object value) {
-        return value == null ? "NULL" : escape(value.toString());
+        if (value == null) {
+            return "NULL";
+        }
+        String text = escape(value.toString());
+        return text.equals("NULL") ? "\\NULL" : text; // keep a string 'NULL' distinguishable from SQL NULL
+    }
+
+    /** True if a value field on the wire is SQL NULL (as opposed to the string {@code 'NULL'}, sent as {@code \NULL}). */
+    public static boolean isNull(String field) {
+        return field.equals("NULL");
     }
 
     static String escape(String s) {
