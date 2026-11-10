@@ -158,7 +158,8 @@ public final class Database implements AutoCloseable {
             lockManager.waitCount(),
             lockManager.waitNanos(),
             lockManager.timeoutCount(),
-            wal.checkpointCount());
+            wal.checkpointCount(),
+            lockManager.deadlockCount());
     }
 
     /**

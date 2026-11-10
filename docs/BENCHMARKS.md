@@ -237,3 +237,36 @@ Interpretation:
 - **What's left in an unindexed lookup** (6 MB): 333 page copies (~1.3 MB) plus decoding all 20,000
   rows into objects before the filter rejects them. Evaluating simple predicates on raw bytes
   before decoding would cut most of the rest (future work).
+
+### After T10: FIFO lock queues, targeted wake-ups, deadlock detection (`bench-results/t10-lockmanager`)
+
+The full T10 run happened while the machine was in a slower state (even CPU-bound scenarios
+that T10 doesn't touch measured ~30% lower than in T9's run), so its absolute numbers aren't
+comparable with earlier sections. The contention scenarios were therefore compared by an
+**interleaved A/B run of the T9 and T10 builds** (two rounds each, same conditions):
+
+| scenario (8 threads) | metric | T9: one monitor, `notifyAll` | T10: FIFO queues |
+|---|---|---:|---:|
+| `concurrent_insert_same_table_t8` | throughput | 1,074 / 1,076 | 1,076 / 994 |
+| | p50 | 1.4 ms | 7.5 ms |
+| | p99 | 108 / 130 ms | 11 / 15 ms |
+| | max | 744 / 661 ms | 12 / 17 ms |
+| `mixed_80read_20write_t8` | throughput | 4,919 / 3,733 | 4,841 / 6,395 |
+| | p50 | 19 µs | 1.1–1.4 ms |
+| | p99 | 29 / 36 ms | 5.1 / 3.5 ms |
+| | max | 88 / 104 ms | 12 / 11 ms |
+
+Interpretation — a deliberate trade:
+
+- **Throughput is unchanged**; the lock manager decides *who* waits, not how much work gets done.
+- **Tail latency collapses** (p99 roughly 7–9× lower, max roughly 10–50× lower). With barging,
+  whoever happened to wake first won; an unlucky transaction could lose race after race, up to
+  three quarters of a second. FIFO bounds how often anyone can be overtaken.
+- **Median latency rises.** The old distribution was bimodal: winners of the race were very fast,
+  losers very slow. Under FIFO each writer waits its turn behind the others (about 7 commits'
+  worth with 8 writers), and readers wait behind queued writers instead of starving them. For a
+  database, predictable latency is usually the better property; a client with a 10 ms deadline
+  failed a meaningful fraction of the time before and essentially never now.
+- **Deadlocks now cost microseconds, not the lock timeout.** `LockManagerV2Test` checks that
+  a two-transaction cycle (and the S→X upgrade deadlock) is detected in well under a second
+  with a 30 s timeout configured.

@@ -4,6 +4,7 @@ import com.strata.buffer.BufferPool;
 import com.strata.catalog.Catalog;
 import com.strata.executor.ExecutionResult;
 import com.strata.executor.Executor;
+import com.strata.lock.DeadlockException;
 import com.strata.lock.LockManager;
 import com.strata.parser.Parser;
 import com.strata.parser.ast.Statement;
@@ -230,6 +231,16 @@ public final class Session implements AutoCloseable {
             ExecutionResult result = activeExecutor.execute(statement);
             succeeded = true;
             return result;
+        } catch (DeadlockException e) {
+            // This transaction was chosen as the deadlock victim. Rolling back only the failed
+            // statement would leave it holding the locks the other transaction in the cycle is
+            // waiting for, so the deadlock would persist until that one timed out. Abort the
+            // whole transaction instead (as MySQL/InnoDB does); the client sees the exception
+            // and must retry.
+            txn.rollbackStatement();
+            succeeded = true; // nothing left for the finally block to undo
+            rollbackActiveTransaction();
+            throw e;
         } finally {
             if (succeeded) {
                 txn.commitStatement();

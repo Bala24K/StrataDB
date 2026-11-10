@@ -1,12 +1,10 @@
 package com.strata.lock;
 
 /**
- * Thrown when a lock request can't be granted within its timeout. This is how
- * {@link LockManager} handles deadlocks: rather than building and analyzing a wait-for graph to
- * detect cycles proactively, a request that waits too long simply gives up. See
- * {@link LockManager}'s class docs for the trade-offs of that choice.
+ * Thrown when a lock request is not granted: because it waited past its timeout, or (as the
+ * subclass {@link DeadlockException}) because waiting would have completed a deadlock cycle.
  */
-public final class LockTimeoutException extends RuntimeException {
+public class LockTimeoutException extends RuntimeException {
 
     public LockTimeoutException(String message) {
         super(message);

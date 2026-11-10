@@ -55,7 +55,8 @@ public final class TestRunner {
         com.strata.storage.InPlaceUpdateTest.class,
         com.strata.index.btree.BPlusTreeTest.class,
         com.strata.optimizer.RangePlanTest.class,
-        com.strata.executor.ExecutionPipelineTest.class
+        com.strata.executor.ExecutionPipelineTest.class,
+        com.strata.lock.LockManagerV2Test.class
     );
 
     public static void main(String[] args) throws Exception {
