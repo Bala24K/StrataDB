@@ -234,6 +234,68 @@ public final class HeapTable {
         return results;
     }
 
+    // ---- streaming access (no per-record copies) ----
+
+    /**
+     * Receives records in place: {@code data[offset .. offset + length)} is the record's bytes
+     * inside its page's buffer, valid only during the call (copy anything you keep).
+     */
+    @FunctionalInterface
+    public interface RecordVisitor {
+        /** @return false to stop the scan early */
+        boolean visit(RecordId rid, byte[] data, int offset, int length) throws IOException;
+    }
+
+    /**
+     * Visits every live record, page by page, without copying records out of their pages and
+     * without materializing the table. Unlike {@link #scanAllWithIds()}, which builds a list of
+     * every record (a {@code byte[]} copy plus a wrapper object each) before the caller can
+     * filter anything, this lets the caller filter, decode, and stop early (e.g. at a LIMIT).
+     */
+    public void scan(RecordVisitor visitor) throws IOException {
+        int currentPageId = firstPageId;
+        while (true) {
+            Page page = pageStore.readPage(currentPageId);
+            SlottedPage slotted = new SlottedPage(page);
+            byte[] data = page.getData();
+            for (int slot = 0; slot < slotted.getNumSlots(); slot++) {
+                int length = slotted.recordLength(slot);
+                if (length >= 0 && !visitor.visit(new RecordId(currentPageId, slot), data, slotted.recordOffset(slot), length)) {
+                    return;
+                }
+            }
+            if (!slotted.hasNextPage()) {
+                return;
+            }
+            currentPageId = slotted.getNextPageId();
+        }
+    }
+
+    /**
+     * Visits the records at {@code rids}, in the given order. Consecutive ids on the same page
+     * share one page read; index scans return ids in key order, which for clustered data means
+     * long same-page runs, so a 100-row range costs a couple of page reads instead of 100.
+     */
+    public void visit(List<RecordId> rids, RecordVisitor visitor) throws IOException {
+        int cachedPageId = -1;
+        Page page = null;
+        SlottedPage slotted = null;
+        for (RecordId rid : rids) {
+            if (rid.getPageId() != cachedPageId) {
+                page = pageStore.readPage(rid.getPageId());
+                slotted = new SlottedPage(page);
+                cachedPageId = rid.getPageId();
+            }
+            int length = slotted.recordLength(rid.getSlotIndex());
+            if (length < 0) {
+                throw new java.util.NoSuchElementException("Slot " + rid.getSlotIndex() + " has been deleted");
+            }
+            if (!visitor.visit(rid, page.getData(), slotted.recordOffset(rid.getSlotIndex()), length)) {
+                return;
+            }
+        }
+    }
+
     private static void formatPage(PageStore pageStore, int pageId) throws IOException {
         Page page = pageStore.readPage(pageId); // freshly allocated, all-zero
         SlottedPage.format(page);

@@ -216,3 +216,24 @@ Interpretation:
 up to about ±25% in fsync-bound scenarios on this laptop are noise, and only larger effects,
 or effects confirmed by an interleaved A/B run of both builds, should be read as real.
 CPU-bound scenarios (lookups, scans) and the JMH numbers are far more stable (typically ±10%).
+
+### After T9: streaming scan pipeline and in-place row decoding (`bench-results/t9-pipeline`)
+
+| scenario | T8 | T9 | change | alloc per op (T8 → T9) |
+|---|---:|---:|---:|---:|
+| full_scan (rows/s) | 3.36 M | 12.6 M | **3.8×** | 0.8 → 0.3 KB per row |
+| point_lookup_scan (no index) | 178 | 543 | **3.1×** | 15.3 → 6.0 MB per query |
+| range_query (B+Tree, 100 rows) | 7,979 | 16,590 | **2.1×** | 531 → 116 KB per query |
+| point_lookup_index | 75,966 | 69,238 | ≈ 1× (noise) | 35 → 35 KB |
+
+Interpretation:
+
+- **Don't materialize what you'll discard.** A full scan used to copy every record into its own
+  `byte[]`, wrap it, and build a list of the entire table before filtering. Records are now
+  decoded straight from the page buffer and dropped unless they match.
+- **Index hits share page reads.** 100 consecutive keys used to cost 100 page reads (each a
+  4 KiB copy); consecutive RecordIds on the same page now share one.
+- **LIMIT without ORDER BY stops the scan** (covered by `ExecutionPipelineTest`).
+- **What's left in an unindexed lookup** (6 MB): 333 page copies (~1.3 MB) plus decoding all 20,000
+  rows into objects before the filter rejects them. Evaluating simple predicates on raw bytes
+  before decoding would cut most of the rest (future work).

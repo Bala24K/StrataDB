@@ -88,6 +88,67 @@ public final class RowSerializer {
         return new Row(values);
     }
 
+    /**
+     * Decodes a row directly from {@code buf[offset .. offset + length)} (typically the record's
+     * bytes inside its page buffer), with no intermediate copy and no stream objects. Produces
+     * exactly what {@link #deserialize(byte[], TableInfo)} would for the same bytes.
+     *
+     * <p>Why a second decoder: the stream-based one allocates a {@code ByteArrayInputStream} and
+     * a {@code DataInputStream} per row, and scans used to copy each record out of its page
+     * first. VARCHAR values use {@code writeUTF}'s format (2-byte length + modified UTF-8);
+     * bytes 0x01-0x7F mean the same in modified and standard UTF-8 (NUL is never encoded as a
+     * single 0x00 byte), so pure-ASCII strings are built directly and anything else falls back
+     * to {@code DataInputStream.readUTF} for exact semantics.
+     */
+    public static Row deserialize(byte[] buf, int offset, int length, TableInfo schema) {
+        List<ColumnDefinition> columns = schema.getColumns();
+        Object[] values = new Object[columns.size()];
+        int p = offset;
+        int end = offset + length;
+        for (int c = 0; c < values.length; c++) {
+            if (p >= end) throw new IllegalArgumentException("Row bytes end before column " + c);
+            boolean isNull = buf[p++] != 0;
+            if (isNull) continue;
+            switch (columns.get(c).getType()) {
+                case INTEGER -> {
+                    values[c] = ((buf[p] & 0xFF) << 24) | ((buf[p + 1] & 0xFF) << 16) | ((buf[p + 2] & 0xFF) << 8) | (buf[p + 3] & 0xFF);
+                    p += 4;
+                }
+                case BIGINT -> {
+                    long v = 0;
+                    for (int i = 0; i < 8; i++) v = (v << 8) | (buf[p + i] & 0xFF);
+                    values[c] = v;
+                    p += 8;
+                }
+                case BOOLEAN -> values[c] = buf[p++] != 0;
+                case VARCHAR -> {
+                    int utfLength = ((buf[p] & 0xFF) << 8) | (buf[p + 1] & 0xFF);
+                    int start = p + 2;
+                    boolean ascii = true;
+                    for (int i = start; i < start + utfLength; i++) {
+                        if (buf[i] <= 0) { // 0x80-0xFF (negative as a byte) or 0x00
+                            ascii = false;
+                            break;
+                        }
+                    }
+                    values[c] = ascii
+                        ? new String(buf, start, utfLength, java.nio.charset.StandardCharsets.ISO_8859_1)
+                        : readModifiedUtf8(buf, p, utfLength + 2);
+                    p = start + utfLength;
+                }
+            }
+        }
+        return new Row(java.util.Arrays.asList(values));
+    }
+
+    private static String readModifiedUtf8(byte[] buf, int offset, int length) {
+        try (DataInputStream in = new DataInputStream(new ByteArrayInputStream(buf, offset, length))) {
+            return in.readUTF();
+        } catch (IOException e) {
+            throw new UncheckedIOException(e);
+        }
+    }
+
     private static void writeValue(DataOutputStream out, DataType type, Object value) throws IOException {
         switch (type) {
             case INTEGER -> out.writeInt((Integer) value);

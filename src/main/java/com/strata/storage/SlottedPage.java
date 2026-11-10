@@ -144,6 +144,19 @@ public final class SlottedPage {
         return slotIndex;
     }
 
+    /** Length of the record at {@code slotIndex}, or -1 if it has been deleted. */
+    public int recordLength(int slotIndex) {
+        validateSlotIndex(slotIndex);
+        int length = slotLength(slotIndex);
+        return length == TOMBSTONE ? -1 : length;
+    }
+
+    /** Byte offset of the record at {@code slotIndex} within the page (meaningless if deleted). */
+    public int recordOffset(int slotIndex) {
+        validateSlotIndex(slotIndex);
+        return slotOffset(slotIndex);
+    }
+
     /** Reads the record stored at {@code slotIndex}. */
     public byte[] getRecord(int slotIndex) {
         validateSlotIndex(slotIndex);

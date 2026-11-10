@@ -187,27 +187,23 @@ public final class Executor {
             assignmentIndices.add(columnIndex(schema, assignment.columnName()));
         }
 
-        int updatedCount = 0;
-        for (HeapTable.StoredRecord stored : fetchCandidates(stmt.tableName(), stmt.where(), table)) {
-            Row row = RowSerializer.deserialize(stored.data(), schema);
-            if (!matches(stmt.where(), row, schema)) {
-                continue;
-            }
-            List<Object> newValues = new ArrayList<>(row.values());
+        // Matches are collected before anything is modified: rows that move must not be visited
+        // twice (the "Halloween problem"), and inside a transaction the scan reads live overlay
+        // pages that the updates would otherwise be rewriting underneath it.
+        List<Match> targets = collectMatches(stmt.tableName(), stmt.where(), table, schema, Long.MAX_VALUE);
+        for (Match target : targets) {
+            List<Object> newValues = new ArrayList<>(target.row().values());
             for (int i = 0; i < stmt.assignments().size(); i++) {
                 int idx = assignmentIndices.get(i);
                 Expr.Literal value = stmt.assignments().get(i).value();
                 newValues.set(idx, coerceLiteral(value, schema.getColumns().get(idx).getType()));
             }
             Row newRow = new Row(newValues);
-
-            // In place when it fits (same RecordId), moved otherwise. Candidates were fully
-            // materialized above, so a moved row is never visited twice (the "Halloween problem").
-            RecordId newRid = table.update(stored.id(), RowSerializer.serialize(newRow, schema));
-            maintainIndexesOnUpdate(schema, row, stored.id(), newRow, newRid);
-            updatedCount++;
+            // In place when it fits (same RecordId), moved otherwise.
+            RecordId newRid = table.update(target.rid(), RowSerializer.serialize(newRow, schema));
+            maintainIndexesOnUpdate(schema, target.row(), target.rid(), newRow, newRid);
         }
-        return new ExecutionResult.RowsUpdated(updatedCount);
+        return new ExecutionResult.RowsUpdated(targets.size());
     }
 
     /**
@@ -240,16 +236,12 @@ public final class Executor {
         TableInfo schema = requireTable(stmt.tableName());
         HeapTable table = catalog.openTable(stmt.tableName());
 
-        int deletedCount = 0;
-        for (HeapTable.StoredRecord stored : fetchCandidates(stmt.tableName(), stmt.where(), table)) {
-            Row row = RowSerializer.deserialize(stored.data(), schema);
-            if (matches(stmt.where(), row, schema)) {
-                maintainIndexesOnDelete(schema, row, stored.id());
-                table.delete(stored.id());
-                deletedCount++;
-            }
+        List<Match> targets = collectMatches(stmt.tableName(), stmt.where(), table, schema, Long.MAX_VALUE);
+        for (Match target : targets) {
+            maintainIndexesOnDelete(schema, target.row(), target.rid());
+            table.delete(target.rid());
         }
-        return new ExecutionResult.RowsDeleted(deletedCount);
+        return new ExecutionResult.RowsDeleted(targets.size());
     }
 
     // ---- SELECT ----
@@ -258,12 +250,11 @@ public final class Executor {
         TableInfo schema = requireTable(stmt.tableName());
         HeapTable table = catalog.openTable(stmt.tableName());
 
+        // Without ORDER BY, the first LIMIT matches are the answer: stop scanning there.
+        long stopAfter = stmt.orderBy().isEmpty() && stmt.limit().isPresent() ? stmt.limit().get() : Long.MAX_VALUE;
         List<Row> matched = new ArrayList<>();
-        for (HeapTable.StoredRecord stored : fetchCandidates(stmt.tableName(), stmt.where(), table)) {
-            Row row = RowSerializer.deserialize(stored.data(), schema);
-            if (matches(stmt.where(), row, schema)) {
-                matched.add(row);
-            }
+        for (Match m : collectMatches(stmt.tableName(), stmt.where(), table, schema, stopAfter)) {
+            matched.add(m.row());
         }
 
         if (!stmt.orderBy().isEmpty()) {
@@ -307,29 +298,43 @@ public final class Executor {
             .orElseThrow(() -> new IllegalStateException("Planner chose an index that no longer exists: " + indexName));
     }
 
+    /** A row that satisfied the WHERE clause, and where it lives. */
+    private record Match(RecordId rid, Row row) {}
+
     /**
-     * Every row a {@code SELECT}/{@code UPDATE}/{@code DELETE} needs to *consider* — not
-     * necessarily every row that ultimately matches. Callers still run the full {@code WHERE}
-     * expression against each candidate afterward via {@link #matches}: an index scan only
-     * narrows which rows are worth checking, it never replaces the check itself (see
-     * {@link QueryPlanner}'s docs for why that matters once an {@code AND} is involved).
+     * The rows of {@code tableName} satisfying {@code where}, in access-path order, stopping
+     * after {@code limit} matches.
+     *
+     * <p>A push pipeline: the chosen access path (full scan, index lookup, or index range) hands
+     * each record's bytes, in place in its page, to a decode-then-filter step, and only matching
+     * rows are kept. This replaced fetching every candidate as a copied {@code byte[]} first (a
+     * full scan built a list of the whole table before filtering anything, ~15 MB per query on
+     * 20,000 rows) and re-reading a 4 KiB page per index hit.
+     *
+     * <p>The full {@code WHERE} is evaluated on every candidate, including index hits: an index
+     * only narrows the candidates, it never replaces the check (see {@link QueryPlanner}).
      */
-    private List<HeapTable.StoredRecord> fetchCandidates(String tableName, Optional<Expr> where, HeapTable table) throws IOException {
-        ScanPlan plan = queryPlanner.planScan(tableName, where);
-        List<RecordId> rids = switch (plan) {
-            case ScanPlan.IndexScan scan -> catalog.openIndex(indexNamed(tableName, scan.indexName())).search(scan.key());
-            case ScanPlan.IndexRangeScan scan -> ((BPlusTree) catalog.openIndex(indexNamed(tableName, scan.indexName())))
-                .range(scan.low(), scan.lowInclusive(), scan.high(), scan.highInclusive());
-            case ScanPlan.FullScan ignored -> null;
-        };
-        if (rids != null) {
-            List<HeapTable.StoredRecord> results = new ArrayList<>(rids.size());
-            for (RecordId rid : rids) {
-                results.add(new HeapTable.StoredRecord(rid, table.read(rid)));
-            }
-            return results;
+    private List<Match> collectMatches(String tableName, Optional<Expr> where, HeapTable table, TableInfo schema, long limit) throws IOException {
+        List<Match> out = new ArrayList<>();
+        if (limit <= 0) {
+            return out;
         }
-        return table.scanAllWithIds();
+        HeapTable.RecordVisitor decodeAndFilter = (rid, data, offset, length) -> {
+            Row row = RowSerializer.deserialize(data, offset, length, schema);
+            if (matches(where, row, schema)) {
+                out.add(new Match(rid, row));
+            }
+            return out.size() < limit;
+        };
+        switch (queryPlanner.planScan(tableName, where)) {
+            case ScanPlan.IndexScan scan ->
+                table.visit(catalog.openIndex(indexNamed(tableName, scan.indexName())).search(scan.key()), decodeAndFilter);
+            case ScanPlan.IndexRangeScan scan ->
+                table.visit(((BPlusTree) catalog.openIndex(indexNamed(tableName, scan.indexName())))
+                    .range(scan.low(), scan.lowInclusive(), scan.high(), scan.highInclusive()), decodeAndFilter);
+            case ScanPlan.FullScan ignored -> table.scan(decodeAndFilter);
+        }
+        return out;
     }
 
     // ---- index maintenance (Phase 10) ----
