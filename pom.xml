@@ -50,9 +50,37 @@
                 <version>3.13.0</version>
             </plugin>
             <plugin>
+                <!-- Adds src/test-junit/java (the JUnit 5 bridge) as a second test source root. -->
+                <groupId>org.codehaus.mojo</groupId>
+                <artifactId>build-helper-maven-plugin</artifactId>
+                <version>3.6.0</version>
+                <executions>
+                    <execution>
+                        <id>add-junit-test-sources</id>
+                        <phase>generate-test-sources</phase>
+                        <goals>
+                            <goal>add-test-source</goal>
+                        </goals>
+                        <configuration>
+                            <sources>
+                                <source>src/test-junit/java</source>
+                            </sources>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+            <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-surefire-plugin</artifactId>
                 <version>3.2.5</version>
+                <configuration>
+                    <!-- The legacy test classes are plain classes, not JUnit tests; they run
+                         only through LegacySuiteTest, never directly. -->
+                    <includes>
+                        <include>**/LegacySuiteTest.java</include>
+                        <include>**/*JUnitTest.java</include>
+                    </includes>
+                </configuration>
             </plugin>
         </plugins>
     </build>
