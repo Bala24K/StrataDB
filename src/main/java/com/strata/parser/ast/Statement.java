@@ -14,8 +14,19 @@ public sealed interface Statement {
     /** {@code CREATE TABLE name (col1 TYPE, col2 TYPE, ...)} */
     record CreateTable(String tableName, List<ColumnDef> columns) implements Statement {}
 
-    /** {@code CREATE INDEX name ON table (column)} — see Phase 10 docs for how it's used by the executor. */
-    record CreateIndex(String indexName, String tableName, String columnName) implements Statement {}
+    /**
+     * {@code CREATE INDEX name ON table [USING HASH | USING BTREE] (column)}. With no
+     * {@code USING} clause ({@link IndexMethod#DEFAULT}) the executor picks: a B+Tree for numeric
+     * and boolean columns, a hash index otherwise.
+     */
+    record CreateIndex(String indexName, String tableName, String columnName, IndexMethod method) implements Statement {
+        public CreateIndex(String indexName, String tableName, String columnName) {
+            this(indexName, tableName, columnName, IndexMethod.DEFAULT);
+        }
+    }
+
+    /** The index structure a {@code CREATE INDEX} asked for. */
+    enum IndexMethod { DEFAULT, HASH, BTREE }
 
     /**
      * {@code INSERT INTO name [(col1, col2, ...)] VALUES (v1, v2, ...)}

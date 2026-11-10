@@ -175,3 +175,44 @@ Interpretation:
   of 16.3 KB (heap page + old and new copies + index bucket pages).
 - Point lookups and scans are unchanged: they're bound by the static hash index and by
   copying every page through the buffer pool. That's T8.
+
+### After T8: B+Tree index and range planning (`bench-results/t8-btree`)
+
+`CREATE INDEX` on a numeric column now builds a B+Tree by default; `point_lookup_index` and
+`range_query` therefore use it, and `point_lookup_hash` keeps measuring the hash index.
+
+| scenario | T7 ops/s | T8 ops/s | change | p50 µs (T7 → T8) | alloc KB/op (T7 → T8) |
+|---|---:|---:|---:|---:|---:|
+| point_lookup_index (B+Tree) | 12,131 | 75,966 | **6.3×** | 70 → 10 | 281 → 35 |
+| point_lookup_hash | 12,131 | 11,084 | ≈ 1× | 70 → 75 | 281 → 281 |
+| range_query (100 keys) | 171 | 7,979 | **47×** | 5,762 → 131 | 15,789 → 531 |
+| mixed_80read_20write t1 | 3,405 | 4,354 | 1.3× | 76 → 9 | 234 → 37 |
+| mixed_80read_20write t8 | 4,170 | 5,052 | 1.2× | 81 → 12 | 247 → 37 |
+
+JMH (`bench-results/t8-btree/jmh-access-path.txt`), all pages cached:
+
+| N | hash lookup | B+Tree lookup | B+Tree 100-key range |
+|---:|---:|---:|---:|
+| 1,000 | 4.1 µs | 2.0 µs | 3.5 µs |
+| 10,000 | 35 µs | 2.1 µs | 4.6 µs |
+| 100,000 | 388 µs | 2.8 µs | 4.4 µs |
+
+Interpretation:
+
+- **Logarithmic vs. linear.** The B+Tree's cost barely moves across two orders of magnitude of N
+  (a root-to-leaf path of 2–3 pages); the hash index's grows with N because its bucket count
+  is fixed at 16. That comparison is about *fixed* hashing, not hashing as such: a resizing
+  hash index (linear or extendible hashing) would also be O(1) and would likely edge out the
+  B+Tree for pure equality lookups. The B+Tree is the default because it also serves ranges.
+- **Range queries stop being full scans**: a 100-key range reads one or two leaves.
+- **Write-path scenarios didn't change.** The first T8 run showed fsync-bound scenarios 10–30%
+  below T7; an interleaved A/B rerun of both builds showed the gap was machine state, not code
+  (T7 itself measured ~20% below its own earlier numbers). See the noise floor note below.
+
+### Noise floor
+
+`concurrent_insert_own_table_t1` and `concurrent_insert_same_table_t1` are the *same* workload
+(one thread, one table). In one T8 run they measured 893 and 1,186 ops/s. So differences of
+up to about ±25% in fsync-bound scenarios on this laptop are noise, and only larger effects,
+or effects confirmed by an interleaved A/B run of both builds, should be read as real.
+CPU-bound scenarios (lookups, scans) and the JMH numbers are far more stable (typically ±10%).

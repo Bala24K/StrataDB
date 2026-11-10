@@ -16,13 +16,27 @@ import java.util.Objects;
  *
  * <p>Serializes the same sequential way {@link TableInfo} does, for the same reason: this is
  * read and written as one complete unit, never accessed mid-field.
+ *
+ * <p>{@link Kind} is <em>not</em> part of the serialized bytes: the catalog stores each kind
+ * under its own record tag, so catalogs written before B+Trees existed (hash entries only)
+ * load unchanged. For a B+Tree, {@code directoryFirstPageId} is the tree's meta page and
+ * {@code numBuckets} is 0.
  */
-public record IndexInfo(String indexName, String tableName, String columnName, int directoryFirstPageId, int numBuckets) {
+public record IndexInfo(String indexName, String tableName, String columnName, int directoryFirstPageId, int numBuckets, Kind kind) {
+
+    /** The index structure. */
+    public enum Kind { HASH, BTREE }
+
+    /** A hash index (the only kind that existed when this record was introduced). */
+    public IndexInfo(String indexName, String tableName, String columnName, int directoryFirstPageId, int numBuckets) {
+        this(indexName, tableName, columnName, directoryFirstPageId, numBuckets, Kind.HASH);
+    }
 
     public IndexInfo {
         Objects.requireNonNull(indexName, "index name");
         Objects.requireNonNull(tableName, "table name");
         Objects.requireNonNull(columnName, "column name");
+        Objects.requireNonNull(kind, "kind");
     }
 
     public byte[] serialize() {
@@ -40,13 +54,18 @@ public record IndexInfo(String indexName, String tableName, String columnName, i
     }
 
     public static IndexInfo deserialize(byte[] data) {
+        return deserialize(data, Kind.HASH);
+    }
+
+    /** {@code kind} comes from the catalog record's tag; see the class docs. */
+    public static IndexInfo deserialize(byte[] data, Kind kind) {
         try (DataInputStream in = new DataInputStream(new ByteArrayInputStream(data))) {
             String indexName = in.readUTF();
             String tableName = in.readUTF();
             String columnName = in.readUTF();
             int directoryFirstPageId = in.readInt();
             int numBuckets = in.readInt();
-            return new IndexInfo(indexName, tableName, columnName, directoryFirstPageId, numBuckets);
+            return new IndexInfo(indexName, tableName, columnName, directoryFirstPageId, numBuckets, kind);
         } catch (IOException e) {
             throw new UncheckedIOException(e);
         }

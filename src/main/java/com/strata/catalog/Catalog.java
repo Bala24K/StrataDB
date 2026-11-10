@@ -1,5 +1,7 @@
 package com.strata.catalog;
 
+import com.strata.index.SecondaryIndex;
+import com.strata.index.btree.BPlusTree;
 import com.strata.index.hash.HashIndex;
 import com.strata.storage.HeapTable;
 import com.strata.storage.page.PageStore;
@@ -46,7 +48,8 @@ public final class Catalog {
     public static final int CATALOG_ROOT_PAGE_ID = 0;
 
     private static final byte TABLE_ENTRY_TAG = 0;
-    private static final byte INDEX_ENTRY_TAG = 1;
+    private static final byte INDEX_ENTRY_TAG = 1;        // hash index (the original format)
+    private static final byte BTREE_INDEX_ENTRY_TAG = 2;  // B+Tree; same payload, new tag keeps old catalogs readable
 
     private final PageStore pageStore;
     private final HeapTable catalogTable;
@@ -97,7 +100,11 @@ public final class Catalog {
                     tables.put(info.getName(), info);
                 }
                 case INDEX_ENTRY_TAG -> {
-                    IndexInfo info = IndexInfo.deserialize(payload);
+                    IndexInfo info = IndexInfo.deserialize(payload, IndexInfo.Kind.HASH);
+                    indexes.put(info.indexName(), info);
+                }
+                case BTREE_INDEX_ENTRY_TAG -> {
+                    IndexInfo info = IndexInfo.deserialize(payload, IndexInfo.Kind.BTREE);
                     indexes.put(info.indexName(), info);
                 }
                 default -> throw new IllegalStateException("Unknown catalog entry tag: " + tag);
@@ -173,19 +180,40 @@ public final class Catalog {
      * against pre-existing data is the executor's responsibility, right after this call.
      */
     public IndexInfo createIndex(String indexName, String tableName, String columnName, int numBuckets) throws IOException {
+        DataType columnType = validateNewIndex(indexName, tableName, columnName);
+        HashIndex hashIndex = HashIndex.create(pageStore, columnType, numBuckets);
+        IndexInfo info = new IndexInfo(indexName, tableName, columnName, hashIndex.getDirectoryFirstPageId(), numBuckets);
+        catalogTable.insert(tagged(INDEX_ENTRY_TAG, info.serialize()));
+        indexes.put(indexName, info);
+        return info;
+    }
+
+    /** Registers a brand-new, empty B+Tree index (numeric or boolean columns only). Populating it is the executor's job, as above. */
+    public IndexInfo createBTreeIndex(String indexName, String tableName, String columnName) throws IOException {
+        DataType columnType = validateNewIndex(indexName, tableName, columnName);
+        if (!supportsBTree(columnType)) {
+            throw new IllegalArgumentException("A B+Tree index needs an INTEGER, BIGINT or BOOLEAN column; '"
+                + columnName + "' is " + columnType + " (use a hash index)");
+        }
+        BPlusTree tree = BPlusTree.create(pageStore);
+        IndexInfo info = new IndexInfo(indexName, tableName, columnName, tree.getMetaPageId(), 0, IndexInfo.Kind.BTREE);
+        catalogTable.insert(tagged(BTREE_INDEX_ENTRY_TAG, info.serialize()));
+        indexes.put(indexName, info);
+        return info;
+    }
+
+    /** Whether a B+Tree can index values of this type (fixed-size, ordered keys). */
+    public static boolean supportsBTree(DataType type) {
+        return type == DataType.INTEGER || type == DataType.BIGINT || type == DataType.BOOLEAN;
+    }
+
+    private DataType validateNewIndex(String indexName, String tableName, String columnName) {
         if (indexes.containsKey(indexName)) {
             throw new IllegalArgumentException("Index '" + indexName + "' already exists");
         }
         TableInfo table = getTable(tableName)
             .orElseThrow(() -> new IllegalArgumentException("No such table: '" + tableName + "'"));
-        DataType columnType = columnTypeOf(table, columnName);
-
-        HashIndex hashIndex = HashIndex.create(pageStore, columnType, numBuckets);
-        IndexInfo info = new IndexInfo(indexName, tableName, columnName, hashIndex.getDirectoryFirstPageId(), numBuckets);
-
-        catalogTable.insert(tagged(INDEX_ENTRY_TAG, info.serialize()));
-        indexes.put(indexName, info);
-        return info;
+        return columnTypeOf(table, columnName);
     }
 
     /** True if an index with this name has been created. */
@@ -215,7 +243,10 @@ public final class Catalog {
     }
 
     /** Reopens a handle to an existing index for searching/inserting/deleting entries. */
-    public HashIndex openIndex(IndexInfo info) {
+    public SecondaryIndex openIndex(IndexInfo info) {
+        if (info.kind() == IndexInfo.Kind.BTREE) {
+            return BPlusTree.open(pageStore, info.directoryFirstPageId());
+        }
         DataType columnType = columnTypeOf(
             getTable(info.tableName()).orElseThrow(() -> new NoSuchElementException("No such table: '" + info.tableName() + "'")),
             info.columnName());

@@ -13,4 +13,11 @@ public sealed interface ScanPlan {
 
     /** Look {@code key} up directly in {@code indexName}, then read only the matching row(s). */
     record IndexScan(String tableName, String indexName, Object key) implements ScanPlan {}
+
+    /**
+     * Read the rows whose key lies in a range, in key order, from the B+Tree {@code indexName}.
+     * A null bound is unbounded on that side.
+     */
+    record IndexRangeScan(String tableName, String indexName, Long low, boolean lowInclusive,
+                          Long high, boolean highInclusive) implements ScanPlan {}
 }

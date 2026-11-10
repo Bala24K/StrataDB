@@ -147,10 +147,23 @@ public final class Parser {
         String indexName = expectIdentifier("an index name");
         expect(TokenType.ON);
         String tableName = expectIdentifier("a table name");
+        Statement.IndexMethod method = Statement.IndexMethod.DEFAULT;
+        if (peekIdentifier("USING")) {
+            // USING / HASH / BTREE are contextual words here, not reserved keywords, so they stay
+            // usable as ordinary table and column names everywhere else.
+            expectIdentifier("USING");
+            String name = expectIdentifier("HASH or BTREE");
+            method = switch (name.toUpperCase(java.util.Locale.ROOT)) {
+                case "HASH" -> Statement.IndexMethod.HASH;
+                case "BTREE" -> Statement.IndexMethod.BTREE;
+                default -> throw new ParseException("Unknown index method '" + name + "' (expected HASH or BTREE)",
+                    previous().getLine(), previous().getColumn());
+            };
+        }
         expect(TokenType.LPAREN);
         String columnName = expectIdentifier("a column name");
         expect(TokenType.RPAREN);
-        return new Statement.CreateIndex(indexName, tableName, columnName);
+        return new Statement.CreateIndex(indexName, tableName, columnName, method);
     }
 
     private ColumnDef parseColumnDef() {
@@ -418,6 +431,11 @@ public final class Parser {
 
     private String expectIdentifier(String what) {
         return expect(TokenType.IDENTIFIER, "Expected " + what).getText();
+    }
+
+    /** True if the next token is an identifier spelled {@code word} (case-insensitive): a contextual keyword. */
+    private boolean peekIdentifier(String word) {
+        return check(TokenType.IDENTIFIER) && peek().getText().equalsIgnoreCase(word);
     }
 
     private ParseException error(String message, Token token) {

@@ -62,18 +62,23 @@ public class CrashInjectionTest {
         Files.deleteIfExists(db);
         Path wal = Path.of(db + ".wal");
         try {
+            // Alternate index structures so both are crash-tested.
+            String method = seed % 2 == 0 ? "HASH" : "BTREE";
             try (Database setup = Database.open(db);
                  Session s = setup.newSession()) {
                 s.execute("CREATE TABLE kv (id INTEGER, val BIGINT, pad VARCHAR);");
-                s.execute("CREATE INDEX kv_id ON kv (id);");
+                s.execute("CREATE INDEX kv_id ON kv USING " + method + " (id);");
             }
 
             TreeMap<Integer, Long> committed = new TreeMap<>();
             Phase crashedIn = Phase.NONE;
+            // Each seed targets one phase: the fault is armed only while that phase runs, so
+            // coverage of every phase doesn't depend on how many pages a given change writes.
+            Phase target = Phase.values()[1 + (int) (seed % 3)];
 
             DiskManager dm = new DiskManager(db);
             WriteAheadLog log = Session.prepareWal(dm);
-            FaultyStore faulty = new FaultyStore(dm, 10 + rnd.nextInt(400), rnd.nextBoolean());
+            FaultyStore faulty = new FaultyStore(dm, 1 + rnd.nextInt(3), rnd.nextBoolean());
             BufferPool pool = new BufferPool(faulty, 4); // tiny: forces eviction write-back mid-transaction
             Session s = Session.open(dm, pool, new LockManager(1_000), log);
             int nextId = 0;
@@ -82,6 +87,7 @@ public class CrashInjectionTest {
             for (int step = 0; step < 300; step++) {
                 TreeMap<Integer, Long> pending = new TreeMap<>(committed);
                 try {
+                    faulty.armed = target == Phase.STATEMENT;
                     s.execute("BEGIN;");
                     int ops = 1 + rnd.nextInt(5);
                     for (int i = 0; i < ops; i++) {
@@ -113,6 +119,7 @@ public class CrashInjectionTest {
                     continue;
                 }
                 if (step % 10 == 9) {
+                    faulty.armed = target == Phase.CHECKPOINT;
                     try {
                         // Data pages reach the file only via eviction and checkpoints, so crash
                         // inside checkpoint flushes too. A failed checkpoint must not truncate the log.
@@ -128,6 +135,7 @@ public class CrashInjectionTest {
                     }
                 }
                 try {
+                    faulty.armed = target == Phase.COMMIT;
                     s.execute("COMMIT;");
                     committed = pending;
                 } catch (IOException | RuntimeException e) {
@@ -179,13 +187,17 @@ public class CrashInjectionTest {
         return result;
     }
 
-    /** Passes everything through to the real file until the N-th write, which fails (optionally torn); all later writes fail too. */
+    /**
+     * Passes everything through to the real file; while {@link #armed}, the N-th write fails
+     * (optionally torn) and every write after it fails too, as if the process had died.
+     */
     static final class FaultyStore implements PageStore {
         private final DiskManager disk;
         private final int failOnWrite;
         private final boolean tear;
         private int writes;
         volatile boolean failed;
+        volatile boolean armed;
 
         FaultyStore(DiskManager disk, int failOnWrite, boolean tear) {
             this.disk = disk;
@@ -201,7 +213,7 @@ public class CrashInjectionTest {
         @Override
         public synchronized void writePage(int pageId, Page page) throws IOException {
             if (failed) throw new IOException("injected crash (process already dead)");
-            if (++writes == failOnWrite) {
+            if (armed && ++writes == failOnWrite) {
                 failed = true;
                 if (tear) {
                     Page torn = disk.readPage(pageId);

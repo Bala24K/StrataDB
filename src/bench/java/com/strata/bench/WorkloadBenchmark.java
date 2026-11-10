@@ -124,6 +124,7 @@ public final class WorkloadBenchmark {
         scenarios.put("insert_autocommit", this::insertAutocommit);
         scenarios.put("insert_batched", this::insertBatched);
         scenarios.put("point_lookup_index", s -> pointLookup(s, true));
+        scenarios.put("point_lookup_hash", this::pointLookupHash);
         scenarios.put("point_lookup_scan", s -> pointLookup(s, false));
         scenarios.put("range_query", this::rangeQuery);
         scenarios.put("full_scan", this::fullScan);
@@ -204,7 +205,27 @@ public final class WorkloadBenchmark {
         }
     }
 
-    /** 100-key range. There is no ordered index yet, so this is always a full scan plus filter. */
+    /** Same as point_lookup_index, but forcing the hash index (point_lookup_index uses the default index). */
+    Result pointLookupHash(Scale s) throws Exception {
+        try (Database db = freshDb(); Session session = db.newSession()) {
+            session.execute("CREATE TABLE t (id INTEGER, val BIGINT, pad VARCHAR);");
+            session.execute("CREATE INDEX t_id ON t USING HASH (id);");
+            loadRows(session, s.bulkRows(), s.batchSize());
+            Random rnd = new Random(7);
+            LatencyRecorder lat = new LatencyRecorder();
+            Measurement m = Measurement.start(db);
+            for (int i = 0; i < s.lookups(); i++) {
+                int key = rnd.nextInt(s.bulkRows());
+                long t0 = System.nanoTime();
+                int found = rows(session.execute("SELECT * FROM t WHERE id = " + key + ";"));
+                lat.record(System.nanoTime() - t0);
+                if (found != 1) throw new IllegalStateException("lookup of " + key + " found " + found);
+            }
+            return m.finish("point_lookup_hash", "table=" + s.bulkRows() + " lookups=" + s.lookups(), s.lookups(), lat);
+        }
+    }
+
+    /** 100-key range: an ordered (B+Tree) index scan once T8 landed; a full scan plus filter before. */
     Result rangeQuery(Scale s) throws Exception {
         try (Database db = freshDb(); Session session = db.newSession()) {
             load(session, s.bulkRows(), s.batchSize(), true);
@@ -331,6 +352,10 @@ public final class WorkloadBenchmark {
     private static void load(Session session, int rows, int batch, boolean index) throws IOException {
         session.execute("CREATE TABLE t (id INTEGER, val BIGINT, pad VARCHAR);");
         if (index) session.execute("CREATE INDEX t_id ON t (id);");
+        loadRows(session, rows, batch);
+    }
+
+    private static void loadRows(Session session, int rows, int batch) throws IOException {
         for (int base = 0; base < rows; base += batch) {
             session.execute("BEGIN;");
             for (int i = base; i < Math.min(rows, base + batch); i++) session.execute(insertSql(i));

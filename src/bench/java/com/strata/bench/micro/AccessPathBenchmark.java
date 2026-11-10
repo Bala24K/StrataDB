@@ -2,6 +2,7 @@ package com.strata.bench.micro;
 
 import com.strata.buffer.BufferPool;
 import com.strata.catalog.DataType;
+import com.strata.index.btree.BPlusTree;
 import com.strata.index.hash.HashIndex;
 import com.strata.storage.HeapTable;
 import com.strata.storage.RecordId;
@@ -39,16 +40,19 @@ public class AccessPathBenchmark {
     public int rows;
 
     private HashIndex index;
+    private BPlusTree btree;
     private HeapTable heap;
 
     @Setup(Level.Trial)
     public void setup() throws IOException {
         BufferPool pool = new BufferPool(new PageBenchmark.InMemoryStore(), 1 << 16);
         index = HashIndex.create(pool, DataType.INTEGER, 16); // the executor's DEFAULT_INDEX_BUCKETS
+        btree = BPlusTree.create(pool);
         heap = HeapTable.create(pool);
         byte[] record = new byte[60];
         for (int i = 0; i < rows; i++) {
             index.insert(i, new RecordId(i / 60, i % 60));
+            btree.insert(i, new RecordId(i / 60, i % 60));
         }
         for (int i = 0; i < Math.min(rows, 20_000); i++) {
             heap.insert(record);
@@ -58,6 +62,18 @@ public class AccessPathBenchmark {
     @Benchmark
     public List<RecordId> hashIndexLookup() throws IOException {
         return index.search(ThreadLocalRandom.current().nextInt(rows));
+    }
+
+    @Benchmark
+    public List<RecordId> btreeLookup() throws IOException {
+        return btree.search(ThreadLocalRandom.current().nextInt(rows));
+    }
+
+    /** 100 consecutive keys: the B+Tree walks one or two leaves; a hash index can't do this at all. */
+    @Benchmark
+    public List<RecordId> btreeRange100() throws IOException {
+        long lo = ThreadLocalRandom.current().nextInt(Math.max(1, rows - 100));
+        return btree.range(lo, true, lo + 99, true);
     }
 
     /** Scans min(rows, 20000) records; heap insert is O(pages) per row, so larger tables are slow to build. */

@@ -5,7 +5,8 @@ import com.strata.catalog.ColumnDefinition;
 import com.strata.catalog.DataType;
 import com.strata.catalog.IndexInfo;
 import com.strata.catalog.TableInfo;
-import com.strata.index.hash.HashIndex;
+import com.strata.index.SecondaryIndex;
+import com.strata.index.btree.BPlusTree;
 import com.strata.optimizer.QueryPlanner;
 import com.strata.optimizer.ScanPlan;
 import com.strata.parser.ast.ColumnType;
@@ -107,11 +108,25 @@ public final class Executor {
         TableInfo schema = requireTable(stmt.tableName());
         int columnIdx = columnIndex(schema, stmt.columnName()); // validates the column before anything is allocated
 
-        IndexInfo indexInfo = catalog.createIndex(stmt.indexName(), stmt.tableName(), stmt.columnName(), DEFAULT_INDEX_BUCKETS);
+        DataType columnType = schema.getColumns().get(columnIdx).getType();
+        boolean btree = switch (stmt.method()) {
+            case BTREE -> true;
+            case HASH -> false;
+            // Like PostgreSQL, default to the ordered index when it can be used: it serves
+            // equality and ranges, and its lookups don't degrade as the table grows.
+            case DEFAULT -> Catalog.supportsBTree(columnType);
+        };
+        if (btree && !Catalog.supportsBTree(columnType)) {
+            throw new ExecutionException("USING BTREE needs an INTEGER, BIGINT or BOOLEAN column; '"
+                + stmt.columnName() + "' is " + columnType + " (use USING HASH)");
+        }
+        IndexInfo indexInfo = btree
+            ? catalog.createBTreeIndex(stmt.indexName(), stmt.tableName(), stmt.columnName())
+            : catalog.createIndex(stmt.indexName(), stmt.tableName(), stmt.columnName(), DEFAULT_INDEX_BUCKETS);
 
         // Catalog only allocates the empty index — populating it from whatever rows the table
         // already has is the executor's job (it's the one that knows how to decode a row's bytes).
-        HashIndex index = catalog.openIndex(indexInfo);
+        SecondaryIndex index = catalog.openIndex(indexInfo);
         HeapTable table = catalog.openTable(stmt.tableName());
         for (HeapTable.StoredRecord stored : table.scanAllWithIds()) {
             Row row = RowSerializer.deserialize(stored.data(), schema);
@@ -209,7 +224,7 @@ public final class Executor {
             if (oldRid.equals(newRid) && java.util.Objects.equals(oldKey, newKey)) {
                 continue;
             }
-            HashIndex index = catalog.openIndex(indexInfo);
+            SecondaryIndex index = catalog.openIndex(indexInfo);
             if (oldKey != null) {
                 index.delete(oldKey, oldRid);
             }
@@ -285,6 +300,13 @@ public final class Executor {
 
     // ---- query planning: full scan vs. index scan (Phase 10) ----
 
+    private IndexInfo indexNamed(String tableName, String indexName) {
+        return catalog.getIndexesForTable(tableName).stream()
+            .filter(info -> info.indexName().equals(indexName))
+            .findFirst()
+            .orElseThrow(() -> new IllegalStateException("Planner chose an index that no longer exists: " + indexName));
+    }
+
     /**
      * Every row a {@code SELECT}/{@code UPDATE}/{@code DELETE} needs to *consider* — not
      * necessarily every row that ultimately matches. Callers still run the full {@code WHERE}
@@ -294,14 +316,15 @@ public final class Executor {
      */
     private List<HeapTable.StoredRecord> fetchCandidates(String tableName, Optional<Expr> where, HeapTable table) throws IOException {
         ScanPlan plan = queryPlanner.planScan(tableName, where);
-        if (plan instanceof ScanPlan.IndexScan indexScan) {
-            IndexInfo indexInfo = catalog.getIndexesForTable(tableName).stream()
-                .filter(info -> info.indexName().equals(indexScan.indexName()))
-                .findFirst()
-                .orElseThrow(() -> new IllegalStateException("Planner chose an index that no longer exists: " + indexScan.indexName()));
-            HashIndex index = catalog.openIndex(indexInfo);
-            List<HeapTable.StoredRecord> results = new ArrayList<>();
-            for (RecordId rid : index.search(indexScan.key())) {
+        List<RecordId> rids = switch (plan) {
+            case ScanPlan.IndexScan scan -> catalog.openIndex(indexNamed(tableName, scan.indexName())).search(scan.key());
+            case ScanPlan.IndexRangeScan scan -> ((BPlusTree) catalog.openIndex(indexNamed(tableName, scan.indexName())))
+                .range(scan.low(), scan.lowInclusive(), scan.high(), scan.highInclusive());
+            case ScanPlan.FullScan ignored -> null;
+        };
+        if (rids != null) {
+            List<HeapTable.StoredRecord> results = new ArrayList<>(rids.size());
+            for (RecordId rid : rids) {
                 results.add(new HeapTable.StoredRecord(rid, table.read(rid)));
             }
             return results;

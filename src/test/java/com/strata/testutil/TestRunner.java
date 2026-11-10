@@ -52,7 +52,9 @@ public final class TestRunner {
         com.strata.engine.MetricsTest.class,
         com.strata.recovery.GroupCommitCheckpointTest.class,
         com.strata.storage.HeapTailHintTest.class,
-        com.strata.storage.InPlaceUpdateTest.class
+        com.strata.storage.InPlaceUpdateTest.class,
+        com.strata.index.btree.BPlusTreeTest.class,
+        com.strata.optimizer.RangePlanTest.class
     );
 
     public static void main(String[] args) throws Exception {

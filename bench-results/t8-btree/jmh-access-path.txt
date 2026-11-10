@@ -1,0 +1,61 @@
+Benchmark                                               (rows)  Mode  Cnt        Score      Error   Units
+AccessPathBenchmark.btreeLookup                           1000  avgt    5        2.041 ±    0.297   us/op
+AccessPathBenchmark.btreeLookup:gc.alloc.rate             1000  avgt    5     9732.478 ± 1403.478  MB/sec
+AccessPathBenchmark.btreeLookup:gc.alloc.rate.norm        1000  avgt    5    20815.397 ±    1.958    B/op
+AccessPathBenchmark.btreeLookup:gc.count                  1000  avgt    5       99.000             counts
+AccessPathBenchmark.btreeLookup:gc.time                   1000  avgt    5      130.000                 ms
+AccessPathBenchmark.btreeLookup                          10000  avgt    5        2.113 ±    0.304   us/op
+AccessPathBenchmark.btreeLookup:gc.alloc.rate            10000  avgt    5     9407.058 ± 1349.112  MB/sec
+AccessPathBenchmark.btreeLookup:gc.alloc.rate.norm       10000  avgt    5    20824.674 ±    3.162    B/op
+AccessPathBenchmark.btreeLookup:gc.count                 10000  avgt    5       93.000             counts
+AccessPathBenchmark.btreeLookup:gc.time                  10000  avgt    5      127.000                 ms
+AccessPathBenchmark.btreeLookup                         100000  avgt    5        2.769 ±    0.087   us/op
+AccessPathBenchmark.btreeLookup:gc.alloc.rate           100000  avgt    5     8616.686 ±  273.148  MB/sec
+AccessPathBenchmark.btreeLookup:gc.alloc.rate.norm      100000  avgt    5    25026.532 ±    1.942    B/op
+AccessPathBenchmark.btreeLookup:gc.count                100000  avgt    5       89.000             counts
+AccessPathBenchmark.btreeLookup:gc.time                 100000  avgt    5      120.000                 ms
+AccessPathBenchmark.btreeRange100                         1000  avgt    5        3.473 ±    0.780   us/op
+AccessPathBenchmark.btreeRange100:gc.alloc.rate           1000  avgt    5     7503.331 ± 1711.134  MB/sec
+AccessPathBenchmark.btreeRange100:gc.alloc.rate.norm      1000  avgt    5    27261.966 ±   11.800    B/op
+AccessPathBenchmark.btreeRange100:gc.count                1000  avgt    5       87.000             counts
+AccessPathBenchmark.btreeRange100:gc.time                 1000  avgt    5      115.000                 ms
+AccessPathBenchmark.btreeRange100                        10000  avgt    5        4.612 ±    1.910   us/op
+AccessPathBenchmark.btreeRange100:gc.alloc.rate          10000  avgt    5     5787.056 ± 2423.055  MB/sec
+AccessPathBenchmark.btreeRange100:gc.alloc.rate.norm     10000  avgt    5    27734.265 ±   11.740    B/op
+AccessPathBenchmark.btreeRange100:gc.count               10000  avgt    5       68.000             counts
+AccessPathBenchmark.btreeRange100:gc.time                10000  avgt    5       81.000                 ms
+AccessPathBenchmark.btreeRange100                       100000  avgt    5        4.360 ±    0.633   us/op
+AccessPathBenchmark.btreeRange100:gc.alloc.rate         100000  avgt    5     6996.654 ± 1044.493  MB/sec
+AccessPathBenchmark.btreeRange100:gc.alloc.rate.norm    100000  avgt    5    31958.116 ±    7.318    B/op
+AccessPathBenchmark.btreeRange100:gc.count              100000  avgt    5       80.000             counts
+AccessPathBenchmark.btreeRange100:gc.time               100000  avgt    5      106.000                 ms
+AccessPathBenchmark.hashIndexLookup                       1000  avgt    5        4.147 ±    1.878   us/op
+AccessPathBenchmark.hashIndexLookup:gc.alloc.rate         1000  avgt    5     3733.075 ± 1636.845  MB/sec
+AccessPathBenchmark.hashIndexLookup:gc.alloc.rate.norm    1000  avgt    5    16062.556 ±    0.574    B/op
+AccessPathBenchmark.hashIndexLookup:gc.count              1000  avgt    5       57.000             counts
+AccessPathBenchmark.hashIndexLookup:gc.time               1000  avgt    5       63.000                 ms
+AccessPathBenchmark.hashIndexLookup                      10000  avgt    5       34.657 ±    8.683   us/op
+AccessPathBenchmark.hashIndexLookup:gc.alloc.rate        10000  avgt    5     3774.832 ±  914.520  MB/sec
+AccessPathBenchmark.hashIndexLookup:gc.alloc.rate.norm   10000  avgt    5   136783.039 ±    0.161    B/op
+AccessPathBenchmark.hashIndexLookup:gc.count             10000  avgt    5       57.000             counts
+AccessPathBenchmark.hashIndexLookup:gc.time              10000  avgt    5       74.000                 ms
+AccessPathBenchmark.hashIndexLookup                     100000  avgt    5      387.861 ±  168.317   us/op
+AccessPathBenchmark.hashIndexLookup:gc.alloc.rate       100000  avgt    5     3359.915 ± 1303.105  MB/sec
+AccessPathBenchmark.hashIndexLookup:gc.alloc.rate.norm  100000  avgt    5  1354481.616 ±    1.069    B/op
+AccessPathBenchmark.hashIndexLookup:gc.count            100000  avgt    5       40.000             counts
+AccessPathBenchmark.hashIndexLookup:gc.time             100000  avgt    5       57.000                 ms
+AccessPathBenchmark.heapScan                              1000  avgt    5       26.562 ±    4.168   us/op
+AccessPathBenchmark.heapScan:gc.alloc.rate                1000  avgt    5     7672.561 ± 1209.663  MB/sec
+AccessPathBenchmark.heapScan:gc.alloc.rate.norm           1000  avgt    5   213472.183 ±    0.028    B/op
+AccessPathBenchmark.heapScan:gc.count                     1000  avgt    5       85.000             counts
+AccessPathBenchmark.heapScan:gc.time                      1000  avgt    5      112.000                 ms
+AccessPathBenchmark.heapScan                             10000  avgt    5      294.724 ±   77.221   us/op
+AccessPathBenchmark.heapScan:gc.alloc.rate               10000  avgt    5     6960.778 ± 1859.293  MB/sec
+AccessPathBenchmark.heapScan:gc.alloc.rate.norm          10000  avgt    5  2143674.019 ±    0.519    B/op
+AccessPathBenchmark.heapScan:gc.count                    10000  avgt    5       71.000             counts
+AccessPathBenchmark.heapScan:gc.time                     10000  avgt    5      100.000                 ms
+AccessPathBenchmark.heapScan                            100000  avgt    5      611.591 ±  162.857   us/op
+AccessPathBenchmark.heapScan:gc.alloc.rate              100000  avgt    5     6576.159 ± 1702.608  MB/sec
+AccessPathBenchmark.heapScan:gc.alloc.rate.norm         100000  avgt    5  4202731.870 ±    3.389    B/op
+AccessPathBenchmark.heapScan:gc.count                   100000  avgt    5       64.000             counts
+AccessPathBenchmark.heapScan:gc.time                    100000  avgt    5       96.000                 ms

@@ -67,7 +67,7 @@ import java.util.List;
  *       B+Tree (the next part of this phase) is for.</li>
  * </ul>
  */
-public final class HashIndex {
+public final class HashIndex implements com.strata.index.SecondaryIndex {
 
     private final PageStore pageStore;
     private final DataType keyType;
