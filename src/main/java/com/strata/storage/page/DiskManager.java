@@ -103,6 +103,19 @@ public final class DiskManager implements PageStore, AutoCloseable {
         return newPageId;
     }
 
+    /** Atomic under this object's monitor, so the returned ids are always consecutive. */
+    @Override
+    public synchronized int allocatePages(int count) throws IOException {
+        if (count < 1) {
+            throw new IllegalArgumentException("count must be at least 1, got " + count);
+        }
+        int first = numPages.get();
+        for (int i = 0; i < count; i++) {
+            allocatePage();
+        }
+        return first;
+    }
+
     /** Total number of pages currently in the file. */
     @Override
     public int getNumPages() {

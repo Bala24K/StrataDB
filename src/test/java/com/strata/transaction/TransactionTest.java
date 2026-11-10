@@ -45,16 +45,40 @@ public class TransactionTest {
         });
     }
 
-    public void testAllocatePageWithinTransactionIsInvisibleUntilCommit() throws IOException {
+    public void testAllocatePageReservesAGloballyUniqueIdButKeepsContentsPrivate() throws IOException {
         withTempFile((tmp, dm) -> {
             Transaction txn = new Transaction(dm);
             int before = dm.getNumPages();
 
             int newPageId = txn.allocatePage();
+            Page page = txn.readPage(newPageId);
+            page.putInt(0, 42);
+            txn.writePage(newPageId, page);
 
-            assertEquals(before, dm.getNumPages(), "an allocation inside a transaction must not grow the real store yet");
-            assertEquals(before + 1, txn.getNumPages(), "the transaction's own view must already reflect the allocation");
-            assertTrue(newPageId >= before);
+            // The id is reserved in the shared store right away, so no other transaction can be
+            // handed the same one (see Transaction.allocatePage for the bug this prevents)...
+            assertEquals(before + 1, dm.getNumPages(), "allocation must reserve the page id in the real store immediately");
+            assertEquals(before, newPageId);
+            // ...but what this transaction writes into the page stays invisible until commit.
+            assertEquals(0, dm.readPage(newPageId).getInt(0), "the new page's contents must stay private until commit");
+        });
+    }
+
+    public void testTwoOpenTransactionsAreNeverHandedTheSamePageId() throws IOException {
+        withTempFile((tmp, dm) -> {
+            Transaction t1 = new Transaction(dm);
+            Transaction t2 = new Transaction(dm);
+            assertTrue(t1.allocatePage() != t2.allocatePage(), "concurrent transactions must get distinct page ids");
+        });
+    }
+
+    public void testRolledBackAllocationsAreTracked() throws IOException {
+        withTempFile((tmp, dm) -> {
+            Transaction txn = new Transaction(dm);
+            int p1 = txn.allocatePage();
+            int p2 = txn.allocatePages(3);
+            txn.rollback();
+            assertEquals(List.of(p1, p2, p2 + 1, p2 + 2), txn.allocatedPageIds());
         });
     }
 
@@ -151,15 +175,19 @@ public class TransactionTest {
         });
     }
 
-    public void testRollbackDiscardsAllocatedPagesToo() throws IOException {
+    public void testRollbackDiscardsWritesToAllocatedPages() throws IOException {
         withTempFile((tmp, dm) -> {
-            int before = dm.getNumPages();
             Transaction txn = new Transaction(dm);
-            txn.allocatePage();
+            int pageId = txn.allocatePage();
+            Page page = txn.readPage(pageId);
+            page.putInt(0, 123);
+            txn.writePage(pageId, page);
 
             txn.rollback();
 
-            assertEquals(before, dm.getNumPages(), "a rolled-back allocation must never grow the real store");
+            // The id itself stays reserved (a known leak until a free-page list exists), but none
+            // of the rolled-back transaction's content may ever reach the real store.
+            assertEquals(0, dm.readPage(pageId).getInt(0), "a rolled-back allocation's contents must never reach the real store");
         });
     }
 

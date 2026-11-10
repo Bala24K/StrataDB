@@ -87,18 +87,11 @@ public final class HashIndex {
             throw new IllegalArgumentException("numBuckets must be at least 1, got " + numBuckets);
         }
 
-        int directoryFirstPageId = -1;
+        // Buckets are addressed as directoryFirstPageId + bucketIndex, so they must be contiguous
+        // even while other transactions allocate concurrently: allocatePages is atomic.
+        int directoryFirstPageId = pageStore.allocatePages(numBuckets);
         for (int i = 0; i < numBuckets; i++) {
-            int pageId = pageStore.allocatePage();
-            if (i == 0) {
-                directoryFirstPageId = pageId;
-            } else if (pageId != directoryFirstPageId + i) {
-                // Should be unreachable given how PageStore implementations hand out page ids with no
-                // concurrent allocation possible yet — but a violated invariant here would
-                // silently corrupt every bucket lookup, so fail loudly instead.
-                throw new IllegalStateException(
-                    "Internal invariant violated: hash index bucket pages must be allocated contiguously");
-            }
+            int pageId = directoryFirstPageId + i;
             Page page = pageStore.readPage(pageId);
             SlottedPage.format(page);
             pageStore.writePage(pageId, page);

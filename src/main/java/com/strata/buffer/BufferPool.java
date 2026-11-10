@@ -116,10 +116,24 @@ public final class BufferPool implements PageStore {
         // real store) should ever decide — so this always goes straight through, unlike an
         // ordinary write.
         int newPageId = diskStore.allocatePage();
-        Frame frame = new Frame();
-        frame.page = diskStore.readPage(newPageId); // already durable, zero-filled
-        cache.put(newPageId, frame);
+        cacheFreshPage(newPageId);
         return newPageId;
+    }
+
+    @Override
+    public synchronized int allocatePages(int count) throws IOException {
+        int first = diskStore.allocatePages(count);
+        for (int i = 0; i < count; i++) {
+            cacheFreshPage(first + i);
+        }
+        return first;
+    }
+
+    /** A just-allocated page is known to be all zeros on disk, so there's no need to read it back. */
+    private void cacheFreshPage(int pageId) {
+        Frame frame = new Frame();
+        frame.page = new Page();
+        cache.put(pageId, frame);
     }
 
     @Override

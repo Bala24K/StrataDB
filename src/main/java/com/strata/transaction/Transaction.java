@@ -6,7 +6,9 @@ import com.strata.storage.page.PageStore;
 import com.strata.storage.page.PageStores;
 
 import java.io.IOException;
+import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 
 /**
@@ -68,7 +70,7 @@ public final class Transaction implements PageStore {
     private final PageStore underlying;
     private final WriteAheadLog wal;
     private final Map<Integer, Page> overlay = new HashMap<>();
-    private int overlayNumPages;
+    private final List<Integer> allocatedPageIds = new ArrayList<>();
     private boolean finished = false;
 
     public Transaction(PageStore underlying) {
@@ -85,7 +87,6 @@ public final class Transaction implements PageStore {
     public Transaction(PageStore underlying, WriteAheadLog wal) {
         this.underlying = underlying;
         this.wal = wal;
-        this.overlayNumPages = underlying.getNumPages();
     }
 
     @Override
@@ -101,17 +102,50 @@ public final class Transaction implements PageStore {
         overlay.put(pageId, page); // buffered only — nothing touches the real store until commit()
     }
 
+    /**
+     * Reserves a page id in the <em>shared</em> underlying store immediately, so it is globally
+     * unique; only the page's contents stay private (in the overlay) until commit.
+     *
+     * <p>An earlier version handed out ids from a private counter initialised from
+     * {@code underlying.getNumPages()} when the transaction began. Two concurrent transactions
+     * then both "allocated" the same id, and the second commit silently overwrote the first's
+     * page: cross-table data corruption, and a cyclic page chain (an infinite loop in
+     * {@code HeapTable.insert}) when both grew the same table. Page allocation is shared state, so
+     * it must be decided by the one store everyone shares, not per transaction.
+     *
+     * <p>Trade-off: if this transaction rolls back, the reserved pages stay allocated but unused
+     * (zero-filled) until a free-page list exists. They're recorded in {@link #allocatedPageIds()}
+     * so that a free list can reclaim them later.
+     */
     @Override
     public int allocatePage() throws IOException {
         requireActive();
-        int newPageId = overlayNumPages++;
-        overlay.put(newPageId, new Page()); // reserve it as an empty page, same as a real allocatePage() would
+        int newPageId = underlying.allocatePage();
+        overlay.put(newPageId, new Page());
+        allocatedPageIds.add(newPageId);
         return newPageId;
+    }
+
+    /** Contiguous variant of {@link #allocatePage()}; atomic whenever the underlying store's is. */
+    @Override
+    public int allocatePages(int count) throws IOException {
+        requireActive();
+        int first = underlying.allocatePages(count);
+        for (int i = 0; i < count; i++) {
+            overlay.put(first + i, new Page());
+            allocatedPageIds.add(first + i);
+        }
+        return first;
     }
 
     @Override
     public int getNumPages() {
-        return overlayNumPages;
+        return underlying.getNumPages();
+    }
+
+    /** Page ids this transaction reserved in the underlying store, in allocation order. */
+    public List<Integer> allocatedPageIds() {
+        return List.copyOf(allocatedPageIds);
     }
 
     /** Applies every buffered write to the underlying store, in page-id order, and fsyncs it. */

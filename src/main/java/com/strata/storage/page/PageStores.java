@@ -20,21 +20,18 @@ public final class PageStores {
     private PageStores() {}
 
     /**
-     * Applies every entry in {@code writes} to {@code target}, in ascending page-id order.
-     * Ascending order matters: any page id at or beyond {@code target}'s current size is
-     * assumed to be a page the original writer allocated itself, and is recreated here via
-     * {@code target.allocatePage()} — which only lands on the right id if pages are grown one
-     * at a time, in the same order they were originally handed out.
+     * Applies every entry in {@code writes} to {@code target}, in ascending page-id order, first
+     * growing {@code target} (zero-filled) until every page id in the batch exists.
      */
     public static void applyAll(PageStore target, Map<Integer, Page> writes) throws IOException {
         for (Map.Entry<Integer, Page> entry : new TreeMap<>(writes).entrySet()) {
             int pageId = entry.getKey();
-            if (pageId >= target.getNumPages()) {
-                int allocated = target.allocatePage();
-                if (allocated != pageId) {
-                    throw new IllegalStateException(
-                        "Internal invariant violated: page numbering diverged while applying a batch of writes");
-                }
+            while (pageId >= target.getNumPages()) {
+                // Unreachable for live commits (Transaction reserves page ids in the real store
+                // at allocation time), but needed by WAL recovery against a file whose growth
+                // never reached disk. Any gap — ids reserved by transactions that never
+                // committed — is simply zero-filled.
+                target.allocatePage();
             }
             target.writePage(pageId, entry.getValue());
         }

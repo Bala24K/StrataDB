@@ -42,7 +42,8 @@ public final class TestRunner {
         com.strata.transaction.SessionBufferPoolTest.class,
         com.strata.optimizer.QueryPlannerTest.class,
         com.strata.recovery.WriteAheadLogTest.class,
-        com.strata.network.DatabaseServerTest.class
+        com.strata.network.DatabaseServerTest.class,
+        com.strata.transaction.ConcurrencyRegressionTest.class
     );
 
     public static void main(String[] args) throws Exception {

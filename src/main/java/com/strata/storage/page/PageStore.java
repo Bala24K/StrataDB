@@ -25,6 +25,27 @@ public interface PageStore {
     /** Grows the store by one page (zero-filled) and returns its new page id. */
     int allocatePage() throws IOException;
 
+    /**
+     * Grows the store by {@code count} zero-filled pages with <em>consecutive</em> ids and returns
+     * the first one. Structures that address pages arithmetically (the hash index's bucket array)
+     * need this to be atomic with respect to other allocators: a loop of {@link #allocatePage()}
+     * calls can interleave with another thread's allocation and leave a gap. Stores shared between
+     * threads must override this atomically; this default is only correct single-threaded.
+     */
+    default int allocatePages(int count) throws IOException {
+        if (count < 1) {
+            throw new IllegalArgumentException("count must be at least 1, got " + count);
+        }
+        int first = allocatePage();
+        for (int i = 1; i < count; i++) {
+            int next = allocatePage();
+            if (next != first + i) {
+                throw new IllegalStateException("non-contiguous allocation: expected page " + (first + i) + ", got " + next);
+            }
+        }
+        return first;
+    }
+
     /** Total number of pages currently in the store. */
     int getNumPages();
 }
