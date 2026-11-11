@@ -71,7 +71,7 @@ JVM:       Java HotSpot 23.0.1, G1, -Xms1g -Xmx1g
 
 ## Results
 
-### Baseline (`bench-results/baseline`, commit 44283ed)
+### Baseline (`bench-results/baseline`, commit 7c89746)
 
 Recorded after the correctness fixes (T1–T4) and before any performance work. The original
 pre-audit code is deliberately **not** the baseline: its concurrent scenarios corrupt data or
@@ -299,7 +299,7 @@ harness gained the two network scenarios above.
 
 ## Final validation
 
-The baseline build (`66fdd80`: engine as of `44283ed`, plus the harness) and the final build
+The baseline build (`93eb21d`: engine as of `7c89746`, plus the harness) and the final build
 were run **interleaved** — baseline, final, baseline, final — so machine drift affects both
 equally. Raw output: `bench-results/final-ab-{baseline,final}-r{1,2}`. Values are round 1 /
 round 2 (each a median of 3 runs).

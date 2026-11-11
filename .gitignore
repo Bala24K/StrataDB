@@ -24,3 +24,6 @@ Thumbs.db
 
 # Benchmark output
 bench-results/scratch*/
+
+# Personal notes (kept out of the public repository)
+docs/private/

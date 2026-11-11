@@ -20,13 +20,13 @@ Benchmark evidence is in [`BENCHMARKS.md`](BENCHMARKS.md); the resulting design 
 
 | # | Finding | Severity | Status |
 |---|---|---|---|
-| 1 | Concurrent transactions were handed the **same new page id** (allocation counter private to each transaction). Cross-table data corruption; same-table autocommit inserts built a cyclic page chain and `HeapTable.insert` spun forever holding the table's X lock. | Critical, reproduced | Fixed in T1 (`5f6b323`): allocate from the shared store. `ConcurrencyRegressionTest`. |
-| 2 | Catalog pages were outside the lock protocol: two concurrent `CREATE TABLE`s lost one table. | Critical, reproduced | Fixed in T2 (`0c6864a`): catalog lock (X for DDL, S otherwise). |
+| 1 | Concurrent transactions were handed the **same new page id** (allocation counter private to each transaction). Cross-table data corruption; same-table autocommit inserts built a cyclic page chain and `HeapTable.insert` spun forever holding the table's X lock. | Critical, reproduced | Fixed in T1 (`0056f85`): allocate from the shared store. `ConcurrencyRegressionTest`. |
+| 2 | Catalog pages were outside the lock protocol: two concurrent `CREATE TABLE`s lost one table. | Critical, reproduced | Fixed in T2 (`8eac1ef`): catalog lock (X for DDL, S otherwise). |
 | 3 | Explicit transactions loaded the catalog at `BEGIN`, before locking: an index created afterwards was never maintained by their inserts. | Critical, reproduced | Fixed in T2: catalog loaded after the first catalog lock. |
-| 4 | No statement-level atomicity: a failed `UPDATE` inside `BEGIN` deleted the row, and `COMMIT` kept that. | High, reproduced | Fixed in T3 (`d7d1a6b`): per-statement savepoints in `Transaction`. |
+| 4 | No statement-level atomicity: a failed `UPDATE` inside `BEGIN` deleted the row, and `COMMIT` kept that. | High, reproduced | Fixed in T3 (`ba2a296`): per-statement savepoints in `Transaction`. |
 | 5 | A client disconnecting mid-transaction held its locks forever. | High, reproduced | Fixed in T3: sessions roll back on close; server always closes them. |
 | 6 | A VARCHAR value `'END'` desynchronised the wire protocol. | Medium, reproduced | Fixed in T3 (framing by row count, escaping); `'NULL'` vs NULL ambiguity fixed in T11. |
-| 7 | Garbage WAL length prefix made the database impossible to open; mid-log corruption silently dropped acknowledged commits. | Medium | Fixed in T4 (`5a81d32`), extended for group commit in T6 (durable-horizon field in WAL v2). |
+| 7 | Garbage WAL length prefix made the database impossible to open; mid-log corruption silently dropped acknowledged commits. | Medium | Fixed in T4 (`8d95761`), extended for group commit in T6 (durable-horizon field in WAL v2). |
 | 8 | WAL log order and in-memory apply order could diverge. | Medium | Fixed in T4 (single critical section), then T6 (group commit with a runtime order check). |
 | 9 | A failure halfway through applying a commit left a half-applied transaction visible. | Medium | Fixed in T4: fail-stop; recovery completes the commit on reopen. |
 | 10 | The server reused a stale `.wal` beside a new database file. | Low | Fixed in T4: `Database` facade, one open/bootstrap/recover path. |
