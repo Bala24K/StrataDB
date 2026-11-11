@@ -134,7 +134,7 @@ And for Phase 5 — the point every earlier module finally meets:
   Planner yet (see the Phase 5 docs for why): without joins or indexes, a full table scan is
   the only possible execution strategy, so `Executor.execute()` doubles as the plan.
 
-And for Phase 6 (in progress):
+And for Phase 6:
 
 - `HashIndex` / `EntryCodec` — a persistent static hash index over `(key, RecordId)` pairs.
   Each bucket is literally a `HeapTable`, reusing Phase 1's page-chaining for overflow. Not yet

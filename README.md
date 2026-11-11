@@ -39,8 +39,8 @@ performance step by step, measuring every change:
 | Concurrent writers, 8 threads, separate tables | flat (no scaling) | scales with threads |
 | Indexed lookup at 100k rows (JMH) | 388 µs (static hash) | 2.8 µs (B+Tree) |
 | 100-key range query | full table scan | B+Tree range scan |
-| Lock contention tail (8 writers, one table) | p99 ~120 ms, max ~0.7 s | p99 ~13 ms, max ~15 ms |
-| Tests | 236 (none run by `mvn test`) | ~300, run by Maven and CI, incl. crash and kill tests |
+| Lock contention tail (8 writers, one table) | p99 ~180–235 ms, max ~1.5–1.8 s | p99 ~12 ms, max ~13 ms |
+| Tests | 236 (none run by `mvn test`) | 296, run by Maven and CI, incl. crash and kill tests |
 
 See the interleaved before/after comparison in [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md#final-validation).
 
