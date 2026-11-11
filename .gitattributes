@@ -1,0 +1,12 @@
+# Store text with LF line endings so the repository is identical on every OS.
+* text=auto eol=lf
+
+# Shell scripts must stay LF to run on Linux/macOS; PowerShell scripts work with either.
+*.sh   text eol=lf
+*.ps1  text eol=crlf
+
+# Binary files
+*.pdf  binary
+*.png  binary
+*.jar  binary
+*.db   binary

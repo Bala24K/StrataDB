@@ -197,5 +197,5 @@ Each milestone below is meant to be a tagged, working release — not a finished
   T6 no-force commits, group commit, checkpoints, WAL format v2; T7 insert tail hint, in-place
   UPDATE, page compaction; T8 B+Tree index and range planner (Phase 6 complete); T9 push-based
   execution with in-place row decoding; T10 FIFO lock queues and deadlock detection; T11
-  protocol measured (binary protocol not justified) and NULL ambiguity fixed. 236 → ~300 tests.
-  Design: [`ENGINE.md`](ENGINE.md); measurements and methodology: [`BENCHMARKS.md`](BENCHMARKS.md).
+  protocol measured (binary protocol not justified) and NULL ambiguity fixed. 236 → 296 tests.
+  Design: [`ENGINE.md`](ENGINE.md); measurements and methodology: [`BENCHMARKS.md`](BENCHMARKS.md); evidence-checked summary: [`FINAL_ENGINEERING_REPORT.md`](FINAL_ENGINEERING_REPORT.md).
